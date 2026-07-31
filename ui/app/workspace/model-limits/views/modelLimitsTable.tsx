@@ -13,28 +13,30 @@ import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdownMenu";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { resetDurationLabels, supportsCalendarAlignment } from "@/lib/constants/governance";
 import { ProviderIconType, RenderProviderIcon } from "@/lib/constants/icons";
 import { ProviderLabels, ProviderName } from "@/lib/constants/logs";
-import { getErrorMessage, useDeleteModelConfigMutation } from "@/lib/store";
-import { ModelConfig } from "@/lib/types/governance";
+import { getModelLimitScope, getModelLimitScopes } from "@/lib/registries/modelLimitScopes";
+import { getErrorMessage, useDeleteModelConfigMutation, useGetModelConfigQuery } from "@/lib/store";
 import { ModelProvider } from "@/lib/types/config";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { ModelConfig } from "@/lib/types/governance";
 import { cn } from "@/lib/utils";
 import { formatCurrency } from "@/lib/utils/governance";
+import { getScopeLabel } from "@/lib/utils/labels";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { ArrowUpRight, ChevronLeft, ChevronRight, Edit, MoreHorizontal, Plus, Search, Trash2 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useQueryState } from "nuqs";
+import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import ModelLimitSheet from "./modelLimitSheet";
 import { ModelLimitsEmptyState } from "./modelLimitsEmptyState";
-import { getScopeLabel } from "@/lib/utils/labels";
-import { getModelLimitScope, getModelLimitScopes } from "@/lib/registries/modelLimitScopes";
 // Side-effect import: pull in downstream scope registrations (enterprise
 // "user" deep-link, etc.). No-op for OSS builds.
 import "@enterprise/lib/registrations/modelLimitScopes";
+import { PIN_SHADOW_RIGHT } from "@/components/table/columnPinning";
 import { useNavigate } from "@tanstack/react-router";
 
 // Helper to format reset duration for display
@@ -123,6 +125,7 @@ interface ModelLimitsTableProps {
 	offset: number;
 	limit: number;
 	onOffsetChange: (offset: number) => void;
+	isLoading?: boolean;
 }
 
 export default function ModelLimitsTable({
@@ -139,17 +142,44 @@ export default function ModelLimitsTable({
 	offset,
 	limit,
 	onOffsetChange,
+	isLoading = false,
 }: ModelLimitsTableProps) {
 	const navigate = useNavigate();
-	const [showModelLimitSheet, setShowModelLimitSheet] = useState(false);
-	const [editingModelConfigId, setEditingModelConfigId] = useState<string | null>(null);
+	// The edit sheet is driven entirely by the URL: /workspace/model-limits?edit=<model-config-id>.
+	// Clicking Edit writes the param, closing it clears the param — so the open
+	// sheet is always shareable/refreshable, and back/forward behave sanely.
+	const [editParam, setEditParam] = useQueryState("edit");
+	const [isCreatingModelLimit, setIsCreatingModelLimit] = useState(false);
 	const [deleteModelConfigId, setDeleteModelConfigId] = useState<string | null>(null);
 
-	// Derive editingModelConfig from props so it stays in sync with RTK cache updates
-	const editingModelConfig = useMemo(
+	const editingModelConfigId = editParam?.trim() || null;
+
+	// Prefer the row from props so it stays in sync with RTK cache updates
+	const editingModelConfigInList = useMemo(
 		() => (editingModelConfigId ? (modelConfigs.find((mc) => mc.id === editingModelConfigId) ?? null) : null),
 		[editingModelConfigId, modelConfigs],
 	);
+
+	// The linked config may not be on the current page/filter, so fetch it by id as a fallback.
+	const needsEditFetch = !!editingModelConfigId && !editingModelConfigInList;
+	const {
+		data: fetchedModelConfigData,
+		error: fetchedModelConfigError,
+		isLoading: isFetchingEditingModelConfig,
+	} = useGetModelConfigQuery(editingModelConfigId ?? "", { skip: !needsEditFetch });
+	const editingModelConfig = editingModelConfigInList ?? (needsEditFetch ? (fetchedModelConfigData?.model_config ?? null) : null);
+
+	// Param pointed at a model limit that no longer exists (or isn't readable).
+	useEffect(() => {
+		if (!fetchedModelConfigError) return;
+		toast.error(`Failed to load model limit: ${getErrorMessage(fetchedModelConfigError)}`);
+		void setEditParam(null);
+	}, [fetchedModelConfigError, setEditParam]);
+
+	// Don't flash the sheet in "create" mode while a linked config is loading.
+	const isResolvingEditParam = needsEditFetch && (isFetchingEditingModelConfig || (!editingModelConfig && !fetchedModelConfigError));
+	const isSheetOpen = (isCreatingModelLimit || !!editingModelConfigId) && !isResolvingEditParam;
+
 	const deletingModelConfig = useMemo(
 		() => (deleteModelConfigId ? (modelConfigs.find((mc) => mc.id === deleteModelConfigId) ?? null) : null),
 		[deleteModelConfigId, modelConfigs],
@@ -164,7 +194,7 @@ export default function ModelLimitsTable({
 	const handleDelete = async (id: string) => {
 		try {
 			await deleteModelConfig(id).unwrap();
-			toast.success("Model limit deleted successfully");
+			toast.success("Limit deleted successfully");
 			setDeleteModelConfigId(null);
 		} catch (error) {
 			toast.error(getErrorMessage(error));
@@ -172,29 +202,29 @@ export default function ModelLimitsTable({
 	};
 
 	const handleAddModelLimit = () => {
-		setEditingModelConfigId(null);
-		setShowModelLimitSheet(true);
+		void setEditParam(null);
+		setIsCreatingModelLimit(true);
 	};
 
 	const handleEditModelLimit = (config: ModelConfig) => {
-		setEditingModelConfigId(config.id);
-		setShowModelLimitSheet(true);
+		setIsCreatingModelLimit(false);
+		void setEditParam(config.id);
 	};
 
-	const handleModelLimitSaved = () => {
-		setShowModelLimitSheet(false);
-		setEditingModelConfigId(null);
+	const closeModelLimitSheet = () => {
+		setIsCreatingModelLimit(false);
+		void setEditParam(null);
 	};
 
 	const hasActiveFilters = debouncedSearch || scope || provider;
 
-	// True empty state: no model limits at all (not just filtered to zero)
-	if (totalCount === 0 && !hasActiveFilters) {
+	// True empty state: no model limits at all (not just filtered to zero).
+	// Suppress while the initial load is in flight so we don't flash the empty
+	// state before the API responds.
+	if (totalCount === 0 && !hasActiveFilters && !isLoading) {
 		return (
 			<>
-				{showModelLimitSheet && (
-					<ModelLimitSheet modelConfig={editingModelConfig} onSave={handleModelLimitSaved} onCancel={() => setShowModelLimitSheet(false)} />
-				)}
+				{isSheetOpen && <ModelLimitSheet modelConfig={editingModelConfig} onSave={closeModelLimitSheet} onCancel={closeModelLimitSheet} />}
 				<ModelLimitsEmptyState onAddClick={handleAddModelLimit} canCreate={hasCreateAccess} />
 			</>
 		);
@@ -202,13 +232,11 @@ export default function ModelLimitsTable({
 
 	return (
 		<>
-			{showModelLimitSheet && (
-				<ModelLimitSheet modelConfig={editingModelConfig} onSave={handleModelLimitSaved} onCancel={() => setShowModelLimitSheet(false)} />
-			)}
+			{isSheetOpen && <ModelLimitSheet modelConfig={editingModelConfig} onSave={closeModelLimitSheet} onCancel={closeModelLimitSheet} />}
 			<AlertDialog open={!!deletingModelConfig} onOpenChange={(open) => !open && setDeleteModelConfigId(null)}>
 				<AlertDialogContent>
 					<AlertDialogHeader>
-						<AlertDialogTitle>Delete Model Limit</AlertDialogTitle>
+						<AlertDialogTitle>Delete Limit</AlertDialogTitle>
 						<AlertDialogDescription>
 							Are you sure you want to delete the limit for &quot;
 							{deletingModelConfig?.model_name && deletingModelConfig.model_name.length > 30
@@ -230,22 +258,22 @@ export default function ModelLimitsTable({
 				</AlertDialogContent>
 			</AlertDialog>
 
-			<div className="space-y-4">
-				<div className="flex items-center justify-between">
+			<div className="flex flex-col overflow-y-auto">
+				<div className="mb-4 flex items-center justify-between">
 					<div>
-						<h1 className="text-lg font-semibold">Model Limits</h1>
+						<h1 className="text-lg font-semibold">Budgets &amp; Limits</h1>
 						<p className="text-muted-foreground text-sm">
-							Configure budgets and rate limits at the model level. For provider-specific limits, visit each provider&apos;s settings.
+							Configure budgets and rate limits at any scope: virtual keys, users, providers, or specific models.
 						</p>
 					</div>
 					<Button onClick={handleAddModelLimit} disabled={!hasCreateAccess} data-testid="model-limits-button-create">
 						<Plus className="h-4 w-4" />
-						Add Model Limit
+						Add Limit
 					</Button>
 				</div>
 
 				{/* Toolbar: Search + Filters */}
-				<div className="flex flex-wrap items-center gap-3">
+				<div className="mb-4 flex flex-wrap items-center gap-3">
 					<div className="relative min-w-[220px] flex-1">
 						<Search className="text-muted-foreground absolute top-1/2 left-3 h-4 w-4 -translate-y-1/2" />
 						<Input
@@ -293,7 +321,11 @@ export default function ModelLimitsTable({
 						<Button
 							variant="ghost"
 							size="sm"
-							onClick={() => { onSearchChange(""); onScopeChange(""); onProviderChange(""); }}
+							onClick={() => {
+								onSearchChange("");
+								onScopeChange("");
+								onProviderChange("");
+							}}
 							data-testid="model-limits-filter-clear"
 						>
 							Clear filters
@@ -301,9 +333,9 @@ export default function ModelLimitsTable({
 					)}
 				</div>
 
-				<div className="rounded-sm border" data-testid="model-limits-table">
-					<Table>
-						<TableHeader>
+				<div className="mb-2 overflow-hidden rounded-sm border" data-testid="model-limits-table">
+					<Table containerClassName="h-full overflow-auto">
+						<TableHeader className="bg-muted sticky top-0 z-10">
 							<TableRow className="hover:bg-transparent">
 								<TableHead className="font-medium">Model</TableHead>
 								<TableHead className="font-medium">Provider</TableHead>
@@ -311,14 +343,16 @@ export default function ModelLimitsTable({
 								<TableHead className="font-medium">Scope Target</TableHead>
 								<TableHead className="font-medium">Budget</TableHead>
 								<TableHead className="font-medium">Rate Limit</TableHead>
-								<TableHead className="w-[100px]"></TableHead>
+								<TableHead className={`bg-muted sticky right-0 z-30 w-[50px] text-right ${PIN_SHADOW_RIGHT}`}></TableHead>
 							</TableRow>
 						</TableHeader>
 						<TableBody>
 							{modelConfigs.length === 0 ? (
 								<TableRow>
 									<TableCell colSpan={7} className="h-24 text-center">
-										<span className="text-muted-foreground text-sm">No matching model limits found.</span>
+										<span className="text-muted-foreground text-sm">
+											{isLoading ? "Loading limits..." : "No matching limits found."}
+										</span>
 									</TableCell>
 								</TableRow>
 							) : (
@@ -399,7 +433,7 @@ export default function ModelLimitsTable({
 														</Tooltip>
 													</TooltipProvider>
 												) : (
-													<span className="text-muted-foreground text-sm">—</span>
+													<span className="text-muted-foreground text-sm">-</span>
 												)}
 											</TableCell>
 											<TableCell className="min-w-[180px]">
@@ -503,8 +537,14 @@ export default function ModelLimitsTable({
 													<span className="text-muted-foreground text-sm">-</span>
 												)}
 											</TableCell>
-											<TableCell onClick={(e) => e.stopPropagation()}>
-												<div className="flex items-center justify-end">
+											<TableCell
+												className={cn(
+													"group-hover:bg-muted dark:bg-card dark:group-hover:bg-muted sticky right-0 z-20 bg-white text-right",
+													PIN_SHADOW_RIGHT,
+												)}
+												onClick={(e) => e.stopPropagation()}
+											>
+												<div className="flex items-center justify-center">
 													<ModelLimitActionsMenu
 														config={config}
 														hasUpdateAccess={hasUpdateAccess}
@@ -524,30 +564,39 @@ export default function ModelLimitsTable({
 
 				{/* Pagination */}
 				{totalCount > 0 && (
-					<div className="flex items-center justify-between px-2">
-						<p className="text-muted-foreground text-sm">
-							Showing {offset + 1}-{Math.min(offset + limit, totalCount)} of {totalCount}
-						</p>
-						<div className="flex gap-2">
+					<div className="flex shrink-0 items-center justify-between text-xs" data-testid="pagination">
+						<div className="text-muted-foreground flex items-center gap-2">
+							{(offset + 1).toLocaleString()}-{Math.min(offset + limit, totalCount).toLocaleString()} of {totalCount.toLocaleString()}{" "}
+							entries
+						</div>
+
+						<div className="flex items-center gap-2">
 							<Button
-								variant="outline"
+								variant="ghost"
 								size="sm"
-								disabled={offset === 0}
 								onClick={() => onOffsetChange(Math.max(0, offset - limit))}
+								disabled={offset === 0}
 								data-testid="model-limits-pagination-prev-btn"
+								aria-label="Previous page"
 							>
-								<ChevronLeft className="mr-1 h-4 w-4" />
-								Previous
+								<ChevronLeft className="size-3" />
 							</Button>
+
+							<div className="flex items-center gap-1">
+								<span>Page</span>
+								<span>{Math.floor(offset / limit) + 1}</span>
+								<span>of {Math.ceil(totalCount / limit)}</span>
+							</div>
+
 							<Button
-								variant="outline"
+								variant="ghost"
 								size="sm"
-								disabled={offset + limit >= totalCount}
 								onClick={() => onOffsetChange(offset + limit)}
+								disabled={offset + limit >= totalCount}
 								data-testid="model-limits-pagination-next-btn"
+								aria-label="Next page"
 							>
-								Next
-								<ChevronRight className="ml-1 h-4 w-4" />
+								<ChevronRight className="size-3" />
 							</Button>
 						</div>
 					</div>

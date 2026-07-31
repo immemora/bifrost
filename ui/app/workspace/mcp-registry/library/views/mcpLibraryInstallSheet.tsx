@@ -1,7 +1,7 @@
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { EnvVarInput } from "@/components/ui/envVarInput";
+import { SecretVarInput } from "@/components/ui/secretVarInput";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { HeadersTable } from "@/components/ui/headersTable";
 import { Input } from "@/components/ui/input";
@@ -13,7 +13,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useToast } from "@/hooks/use-toast";
 import { getErrorMessage, useCreateMCPClientMutation } from "@/lib/store";
-import { CreateMCPClientRequest, EnvVar, MCPAuthType, MCPLibraryEntry, MCPTLSConfig } from "@/lib/types/mcp";
+import { CreateMCPClientRequest, SecretVar, MCPAuthType, MCPLibraryEntry, MCPTLSConfig } from "@/lib/types/mcp";
 import { parseArrayFromText } from "@/lib/utils/array";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { Globe, Info, KeyRound, Radio, ShieldCheck, Terminal } from "lucide-react";
@@ -31,15 +31,24 @@ interface MCPLibraryInstallSheetProps {
 	onInstalled: () => void;
 }
 
-const emptyEnvVar: EnvVar = { value: "", env_var: "", from_env: false };
+const emptySecretVar: SecretVar = { value: "", ref: "" };
 
 /** Strips empty TLS config so we don't send `{}` to the server. */
 function buildTLSConfigPayload(tls: MCPTLSConfig | undefined): MCPTLSConfig | undefined {
 	if (!tls) return undefined;
 	const hasSkipVerify = tls.insecure_skip_verify === true;
-	const hasCACert = tls.ca_cert_pem?.value || tls.ca_cert_pem?.from_env;
+	const hasCACert = tls.ca_cert_pem?.value?.trim() || tls.ca_cert_pem?.ref?.trim();
 	if (!hasSkipVerify && !hasCACert) return undefined;
 	return { insecure_skip_verify: tls.insecure_skip_verify, ca_cert_pem: hasCACert ? tls.ca_cert_pem : undefined };
+}
+
+function isValidOAuthResourceURI(value: string): boolean {
+	try {
+		const parsed = new URL(value);
+		return parsed.protocol !== "" && parsed.hash === "";
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -65,10 +74,10 @@ function buildInitialValues(server: MCPLibraryEntry): CreateMCPClientRequest {
 		is_code_mode_client: false,
 		is_ping_available: true,
 		connection_type: server.connection_type || "http",
-		connection_string: isStdio ? undefined : server.connection_url ? { value: server.connection_url, env_var: "", from_env: false } : emptyEnvVar,
+		connection_string: isStdio ? undefined : server.connection_url ? { value: server.connection_url, ref: "" } : emptySecretVar,
 		stdio_config: isStdio && server.stdio_config ? server.stdio_config : undefined,
 		auth_type: authType,
-		headers: authType === "headers" ? { Authorization: { value: "", env_var: "", from_env: false } } : undefined,
+		headers: authType === "headers" ? { Authorization: { value: "", ref: "" } } : undefined,
 	};
 }
 
@@ -130,6 +139,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 	const [createMCPClient] = useCreateMCPClientMutation();
 	const [isLoading, setIsLoading] = useState(false);
 	const [scopesText, setScopesText] = useState("");
+	const [resourceText, setResourceText] = useState("");
 	const [envVars, setEnvVars] = useState<Record<string, string>>({});
 	const [oauthFlow, setOauthFlow] = useState<{
 		authorizeUrl: string;
@@ -180,7 +190,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 		}
 		setValue("auth_type", authScope === "per_user" ? "per_user_headers" : "headers");
 		setValue("oauth_config", undefined);
-		setValue("headers", { Authorization: { value: "", env_var: "", from_env: false } });
+		setValue("headers", { Authorization: { value: "", ref: "" } });
 	};
 
 	const applyAuthScope = (scope: "shared" | "per_user") => {
@@ -206,6 +216,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 		if (!open) return;
 		reset(defaultValues);
 		setScopesText("");
+		setResourceText("");
 		setEnvVars(initialEnvVars);
 		setOauthFlow(null);
 		setHeadersFlow(null);
@@ -217,8 +228,8 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 
 	const headersValidationError = useMemo(() => {
 		if ((authType !== "headers" && authType !== "per_user_headers") || !headers) return null;
-		for (const [key, envVar] of Object.entries(headers)) {
-			if (!envVar.value && !envVar.env_var) {
+		for (const [key, secretVar] of Object.entries(headers)) {
+			if (!secretVar.value && !secretVar.ref) {
 				return `Header "${key}" must have a value`;
 			}
 		}
@@ -257,6 +268,14 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 				});
 				hasErrors = true;
 			}
+			if (resourceText.trim() && !isValidOAuthResourceURI(resourceText.trim())) {
+				toast({
+					title: "Invalid resource URI",
+					description: "OAuth resource must be an absolute URI without a fragment.",
+					variant: "destructive",
+				});
+				hasErrors = true;
+			}
 		}
 
 		if (authType === "per_user_headers") {
@@ -277,18 +296,18 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 		const stdioConfig =
 			isStdio && server.stdio_config
 				? {
-					command: server.stdio_config.command,
-					args: server.stdio_config.args || [],
-					envs: (server.stdio_config.envs || []).map((name) => {
-						const val = envVars[name]?.trim();
-						return val ? `${name}=${val}` : name;
-					}),
-				}
+						command: server.stdio_config.command,
+						args: server.stdio_config.args || [],
+						envs: (server.stdio_config.envs || []).map((name) => {
+							const val = envVars[name]?.trim();
+							return val ? `${name}=${val}` : name;
+						}),
+					}
 				: undefined;
 		const payload: CreateMCPClientRequest = {
 			...data,
 			connection_type: server.connection_type || "http",
-			connection_string: isStdio ? undefined : { value: connectionUrl, env_var: "", from_env: false },
+			connection_string: isStdio ? undefined : { value: connectionUrl, ref: "" },
 			stdio_config: stdioConfig,
 			is_code_mode_client: false,
 			is_ping_available: true,
@@ -296,17 +315,18 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 			oauth_config:
 				authType === "oauth" || authType === "per_user_oauth"
 					? {
-						client_id: data.oauth_config?.client_id ?? emptyEnvVar,
-						client_secret:
-							data.oauth_config?.client_secret?.value || data.oauth_config?.client_secret?.from_env
-								? data.oauth_config.client_secret
-								: undefined,
-						authorize_url: data.oauth_config?.authorize_url || undefined,
-						token_url: data.oauth_config?.token_url || undefined,
-						registration_url: data.oauth_config?.registration_url || undefined,
-						scopes: scopesText.trim() ? parseArrayFromText(scopesText) : undefined,
-						server_url: connectionUrl || undefined,
-					}
+							client_id: data.oauth_config?.client_id ?? emptySecretVar,
+							client_secret:
+								data.oauth_config?.client_secret?.value?.trim() || data.oauth_config?.client_secret?.ref?.trim()
+									? data.oauth_config.client_secret
+									: undefined,
+							authorize_url: data.oauth_config?.authorize_url || undefined,
+							token_url: data.oauth_config?.token_url || undefined,
+							registration_url: data.oauth_config?.registration_url || undefined,
+							scopes: scopesText.trim() ? parseArrayFromText(scopesText) : undefined,
+							server_url: connectionUrl || undefined,
+							resource: resourceText.trim() || undefined,
+						}
 					: undefined,
 			headers:
 				(authType === "headers" || authType === "per_user_headers") && data.headers && Object.keys(data.headers).length > 0
@@ -345,6 +365,10 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 			onClose();
 		} catch (error) {
 			setIsLoading(false);
+			if ((error as any)?.status === 409) {
+				setError("name", { message: getErrorMessage(error) });
+				return;
+			}
 			toast({
 				title: "Error",
 				description: getErrorMessage(error),
@@ -357,7 +381,8 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 	const isStdio = server.connection_type === "stdio";
 	const isOauth = authType === "oauth" || authType === "per_user_oauth";
 	const isPerUserHeaders = authType === "per_user_headers";
-	const displayUrl = server.connection_url || (server.stdio_config ? `${server.stdio_config.command} ${(server.stdio_config.args || []).join(" ")}` : "—");
+	const displayUrl =
+		server.connection_url || (server.stdio_config ? `${server.stdio_config.command} ${(server.stdio_config.args || []).join(" ")}` : "—");
 	const installButtonLabel = isOauth || isPerUserHeaders ? "Continue" : "Install";
 
 	return (
@@ -372,7 +397,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 					<form onSubmit={handleSubmit(onSubmit)} className="flex min-h-0 flex-1 flex-col">
 						<div className="flex-1 space-y-6 px-8 pt-5 pb-6">
 							<section className="border-b pb-5">
-								<div className="flex items-start gap-3 rounded-sm border bg-muted/10 p-3">
+								<div className="bg-muted/10 flex items-start gap-3 rounded-sm border p-3">
 									<div className="bg-background flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-sm border">
 										<img
 											src={iconUrl}
@@ -428,8 +453,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 											message: "Server name cannot exceed 50 characters",
 										},
 										validate: {
-											format: (value) =>
-												/^[a-zA-Z0-9_]+$/.test(value) || "Server name can only contain letters, numbers, and underscores",
+											format: (value) => /^[a-zA-Z0-9_]+$/.test(value) || "Server name can only contain letters, numbers, and underscores",
 											noLeadingDigit: (value) => !/^[0-9]/.test(value) || "Server name cannot start with a number",
 										},
 									}}
@@ -540,7 +564,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 													keyPlaceholder="Header name"
 													valuePlaceholder="Header value"
 													label="Headers"
-													useEnvVarInput
+													useSecretVarInput
 												/>
 												{headersValidationError && <p className="text-destructive text-xs">{headersValidationError}</p>}
 												<FormMessage />
@@ -586,7 +610,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 														keyPlaceholder="Header name"
 														valuePlaceholder="Header value"
 														label="Static Headers (optional, applied alongside user values)"
-														useEnvVarInput
+														useSecretVarInput
 													/>
 													{headersValidationError && <p className="text-destructive text-xs">{headersValidationError}</p>}
 													<FormMessage />
@@ -622,7 +646,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 																</TooltipProvider>
 															</div>
 															<FormControl>
-																<EnvVarInput
+																<SecretVarInput
 																	value={field.value}
 																	onChange={field.onChange}
 																	placeholder="your-client-id"
@@ -641,7 +665,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 														<FormItem>
 															<FormLabel>OAuth client secret</FormLabel>
 															<FormControl>
-																<EnvVarInput
+																<SecretVarInput
 																	value={field.value}
 																	onChange={field.onChange}
 																	placeholder="optional for PKCE"
@@ -735,6 +759,15 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 														data-testid="library-oauth-scopes-input"
 													/>
 												</div>
+												<div className="space-y-2">
+													<Label>Resource</Label>
+													<Input
+														value={resourceText}
+														onChange={(event) => setResourceText(event.target.value)}
+														placeholder="https://provider.example.com/mcp or urn:example:mcp"
+														data-testid="library-oauth-resource-input"
+													/>
+												</div>
 											</AccordionContent>
 										</AccordionItem>
 									</Accordion>
@@ -756,7 +789,8 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 															<div className="space-y-0.5">
 																<FormLabel>Skip TLS verification</FormLabel>
 																<p className="text-muted-foreground text-sm">
-																	Disable TLS certificate verification. Use only in trusted isolated environments. Takes priority over CA certificate.
+																	Disable TLS certificate verification. Use only in trusted isolated environments. Takes priority over CA
+																	certificate.
 																</p>
 															</div>
 															<FormControl>
@@ -776,7 +810,7 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 														<FormItem>
 															<FormLabel>CA Certificate (PEM) (Optional)</FormLabel>
 															<FormControl>
-																<EnvVarInput
+																<SecretVarInput
 																	variant="textarea"
 																	placeholder={`-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE----- or env.MCP_CA_CERT_PEM`}
 																	className="font-mono text-xs"
@@ -863,6 +897,10 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 							variant: "destructive",
 						});
 					}}
+					onConflict={(error) => {
+						setOauthFlow(null);
+						setError("name", { message: error });
+					}}
 					authorizeUrl={oauthFlow.authorizeUrl}
 					oauthConfigId={oauthFlow.oauthConfigId}
 					mcpClientId={oauthFlow.mcpClientId}
@@ -888,6 +926,10 @@ export function MCPLibraryInstallSheet({ server, open, onClose, onInstalled }: M
 					}}
 					onError={() => {
 						/* error toast handled by the dialog itself */
+					}}
+					onConflict={(error) => {
+						setHeadersFlow(null);
+						setError("name", { message: error });
 					}}
 					payload={headersFlow.payload}
 					perUserHeaderKeys={perUserHeaderKeys}

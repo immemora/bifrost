@@ -195,6 +195,79 @@ run-id namespacing. The runner also forwards the full per-provider credential se
 (`anthropic_api_key`, `azure_*`, `bedrock_*`, `vertex_*`, etc.) so per-provider
 expansion needs no runner change.
 
+### Auth Matrix Tests
+
+| Path | Description |
+|------|-------------|
+| `collections/bifrost-v1-auth-matrix.postman_collection.json` | Asserts the separation between inference auth (governance / virtual key) and dashboard auth (admin password on `/api/*`). |
+| `runners/individual/run-newman-auth-matrix-tests.sh` | Boots a fresh server per config combination and runs the collection against each. |
+
+Unlike the other runners, this one **boots its own servers** — each of the four
+combinations needs a different boot config, so it cannot reuse a shared running
+server. It requires a built `bifrost-http` binary.
+
+It sweeps the 2x2 of `client.enforce_auth_on_inference` x
+`governance.auth_config.is_enabled` (admin password) with a pre-seeded virtual key
+and an unreachable dummy provider (so "auth passed" surfaces as a non-401 upstream
+error). Per combination it asserts:
+
+- **VK-authenticated inference is never blocked by the auth layer** (never 401),
+  in every combination — including admin-password-on. This is the core regression
+  guard: the admin middleware must not reject virtual-key inference.
+- **No-VK inference** is rejected by governance with `virtual_key_required` only
+  when `enforce_auth_on_inference` is on; otherwise it passes the auth layer.
+- **Admin Basic auth is not a substitute for a VK** on inference (same governance
+  rejection when enforce is on).
+- **`/api/config`** requires admin creds (admin-middleware `Unauthorized`) only
+  when admin password auth is on; it is open otherwise.
+
+Run locally (from this directory):
+
+```bash
+./runners/individual/run-newman-auth-matrix-tests.sh --binary /path/to/bifrost-http
+# options: --port <port> (default 8090), --html, --json, --verbose, --bail
+```
+
+### MCP Auth Tests
+
+| Path | Description |
+|------|-------------|
+| `collections/bifrost-v1-mcp-auth.postman_collection.json` | Asserts inbound `/mcp` authentication across the three server auth modes (`headers` / `both` / `oauth`): discovery gating, the credential connect matrix, the full issuance flow, refresh rotation + family revocation, the revocation window, and the runtime `headers`→`both` upgrade. |
+| `runners/individual/run-newman-mcp-auth-tests.sh` | Builds + starts the upstream MCP server, then boots a fresh server per `client.mcp_server_auth_mode` and runs the collection against each. |
+
+Like the auth-matrix runner, this one **boots its own servers** — each mode needs a
+different boot config. It also builds and starts the upstream MCP server
+(`examples/mcps/http-no-ping-server`) so `/mcp` exposes real tools, and pre-seeds it
+as an MCP client plus two virtual keys (one active, one inactive). It requires a
+built `bifrost-http` binary.
+
+The collection's test scripts branch on the `auth_mode` env-var, so a single
+collection encodes the full matrix. Per mode it asserts:
+
+- **`headers` (default):** discovery endpoints 404; every virtual-key credential
+  (`x-bf-vk`, `Authorization: Bearer <vk>`, `x-api-key`) connects exactly as before;
+  anonymous connects when auth is not enforced; an inactive key never connects. The
+  OAuth surface is invisible.
+- **`both`:** every header-credential outcome is identical to `headers`, and only
+  *adds* JWT acceptance + live discovery; an invalid JWT is rejected with
+  `WWW-Authenticate`.
+- **`oauth`:** header credentials and anonymous are rejected (401 +
+  `WWW-Authenticate`); only issued JWTs connect.
+
+In `both`/`oauth` it also runs the end-to-end issuance flow (dynamic client
+registration, PKCE-S256 authorize, consent bound to a virtual key or to a
+server-minted session, token exchange, JWT connect), then refresh rotation with
+stolen-token family revocation, the revocation window (a revoked grant stops refresh
+while its already-issued access token keeps working until expiry), and — from the
+`headers` boot — the runtime `headers`→`both` upgrade.
+
+Run locally (from this directory):
+
+```bash
+./runners/individual/run-newman-mcp-auth-tests.sh --binary /path/to/bifrost-http
+# options: --port <port> (default 8090), --mcp-port <port> (default 3001), --html, --json, --verbose, --bail
+```
+
 ### Test Success Criteria
 
 A request **passes** if either:

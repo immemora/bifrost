@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/fasthttp/router"
 	"github.com/maximhq/bifrost/core/providers/anthropic"
 	"github.com/maximhq/bifrost/core/providers/openai"
 	"github.com/maximhq/bifrost/core/schemas"
@@ -36,6 +37,24 @@ func TestParsePassthroughBody_MultipartExtractsModelAfterFilePart(t *testing.T) 
 	model, stream := parsePassthroughBody(writer.FormDataContentType(), body.Bytes())
 	assert.Equal(t, "openai/whisper-1", model)
 	assert.True(t, stream)
+}
+
+func TestChatGPTPassthroughRouterRegistersCodexResponsesPost(t *testing.T) {
+	r := router.New()
+	passthroughRouter := NewChatGPTPassthroughRouter(nil, &mockHandlerStore{}, &testLogger{})
+	passthroughRouter.RegisterRoutes(r, func(next fasthttp.RequestHandler) fasthttp.RequestHandler {
+		return func(ctx *fasthttp.RequestCtx) {
+			ctx.SetStatusCode(fasthttp.StatusNoContent)
+		}
+	})
+
+	var ctx fasthttp.RequestCtx
+	ctx.Request.Header.SetMethod(fasthttp.MethodPost)
+	ctx.Request.SetRequestURI("/chatgpt_passthrough/backend-api/codex/responses")
+
+	r.Handler(&ctx)
+
+	require.Equal(t, fasthttp.StatusNoContent, ctx.Response.StatusCode())
 }
 
 func TestRequestWithSettableExtraParams_OpenAIChatRequest(t *testing.T) {
@@ -377,10 +396,15 @@ func TestOpenAIChatStructuredOutputRequestParserAndConverter(t *testing.T) {
 	assert.Contains(t, responseFormat, "json_schema")
 }
 
-func TestCreateHandler_AnthropicRouteClears_UseRawRequestBody_WhenCatalogSelectsBedrock(t *testing.T) {
-	handlerStore := &mockHandlerStore{
-		availableProviders: []schemas.ModelProvider{schemas.Bedrock},
-	}
+// TestCreateHandler_AnthropicRouteSetsPassthroughFlags verifies that a Claude
+// Code request on the Anthropic route is marked for raw-body passthrough by the
+// checkAnthropicPassthrough pre-callback, and that the flags are still set at
+// converter time. The router does not clear them when the model later resolves
+// to a non-native provider (e.g. Bedrock) — that happens per attempt in core
+// (clearAnthropicPassthroughForNonNativeProvider), after final provider
+// resolution.
+func TestCreateHandler_AnthropicRouteSetsPassthroughFlags(t *testing.T) {
+	handlerStore := &mockHandlerStore{}
 
 	var capturedUseRaw interface{}
 	var capturedSendRawResponse interface{}
@@ -415,10 +439,12 @@ func TestCreateHandler_AnthropicRouteClears_UseRawRequestBody_WhenCatalogSelects
 
 	router.createHandler(route)(ctx)
 
-	require.Equal(t, fasthttp.StatusInternalServerError, ctx.Response.StatusCode())
-	require.Equal(t, false, capturedUseRaw, "UseRawRequestBody should be cleared when catalog selects Bedrock")
-	require.Equal(t, false, capturedSendRawResponse, "SendBackRawResponse should be cleared when catalog selects Bedrock")
-	require.Equal(t, false, capturedPassthroughOverrides, "PassthroughOverridesPresent should be cleared when catalog selects Bedrock")
+	// Non-Bifrost errors without an explicit status code map to 400 (see
+	// GenericRouter.sendError), so the converter's sentinel error surfaces as one.
+	require.Equal(t, fasthttp.StatusBadRequest, ctx.Response.StatusCode())
+	require.Equal(t, true, capturedUseRaw, "UseRawRequestBody should be set for a Claude Code request")
+	require.Equal(t, true, capturedSendRawResponse, "SendBackRawResponse should be set for a Claude Code request")
+	require.Equal(t, true, capturedPassthroughOverrides, "PassthroughOverridesPresent should be set for a Claude Code request")
 }
 
 func TestCreateHandler_CustomParserFailureClosesConnection(t *testing.T) {

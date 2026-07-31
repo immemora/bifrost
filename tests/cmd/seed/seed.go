@@ -1,4 +1,4 @@
-// Package e2eseed creates deterministic OSS fixtures for API and DAC tests.
+// Package seed creates deterministic OSS fixtures for API and DAC tests.
 package seed
 
 import (
@@ -224,9 +224,9 @@ func rawConfigValue(raw json.RawMessage) string {
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err == nil {
-		return schemas.NewEnvVar(text).GetValue()
+		return schemas.NewSecretVar(text).GetValue()
 	}
-	var env schemas.EnvVar
+	var env schemas.SecretVar
 	if err := json.Unmarshal(raw, &env); err == nil {
 		return env.GetValue()
 	}
@@ -258,7 +258,8 @@ func SeedBase(ctx context.Context, configDB, logsDB *gorm.DB, opts Options) (*Su
 		return nil, err
 	}
 	seedBaseTime = time.Now().UTC()
-	InitEncryption(opts)
+	// Encryption is initialized by the caller (see cmd/e2eseed/main.go) before
+	// SeedBase runs, so we do not re-initialize it here.
 	env := SeedEnv(opts.Prefix)
 	manifest := BuildExpectedManifest(opts.Prefix, opts.LogRowsPerShape)
 	summary := &Summary{
@@ -577,7 +578,7 @@ func seedProviders(ctx context.Context, db *gorm.DB, prefix string, now time.Tim
 			ProviderID:  provider.ID,
 			Provider:    providerName,
 			KeyID:       prefix + "-" + providerName + "-key",
-			Value:       *schemas.NewEnvVar(strings.ToUpper(providerName) + "_API_KEY"),
+			Value:       *schemas.NewSecretVar(strings.ToUpper(providerName) + "_API_KEY"),
 			Models:      schemas.WhiteList{"*"},
 			Status:      "active",
 			Description: "e2e seeded provider key",
@@ -597,7 +598,6 @@ func seedProviders(ctx context.Context, db *gorm.DB, prefix string, now time.Tim
 
 // seedGovernance writes customers, teams, budgets, rate limits, VKs, and VK provider configs.
 func seedGovernance(ctx context.Context, db *gorm.DB, prefix string, now time.Time) error {
-	active := true
 	tiggingsCustomer := prefix + "-customer-tiggings"
 	outsideCustomer := prefix + "-customer-outside"
 	tiggingsTeam := prefix + "-team-tiggings"
@@ -612,10 +612,11 @@ func seedGovernance(ctx context.Context, db *gorm.DB, prefix string, now time.Ti
 			return err
 		}
 	}
+	active := new(true)
 	for _, vk := range []tables.TableVirtualKey{
-		{ID: prefix + "-vk-user-team", Name: "E2E User Team VK", Value: prefix + "-vk-user-team-secret", IsActive: &active, TeamID: &tiggingsTeam, CreatedAt: now, UpdatedAt: now},
-		{ID: prefix + "-vk-team-only", Name: "E2E Team Only VK", Value: prefix + "-vk-team-only-secret", IsActive: &active, TeamID: &tiggingsTeam, CreatedAt: now, UpdatedAt: now},
-		{ID: prefix + "-vk-outside", Name: "E2E Outside VK", Value: prefix + "-vk-outside-secret", IsActive: &active, TeamID: &outsideTeam, CreatedAt: now, UpdatedAt: now},
+		{ID: prefix + "-vk-user-team", Name: "E2E User Team VK", Value: *schemas.NewSecretVar(prefix + "-vk-user-team-secret"), IsActive: active, TeamID: &tiggingsTeam, CreatedAt: now, UpdatedAt: now},
+		{ID: prefix + "-vk-team-only", Name: "E2E Team Only VK", Value: *schemas.NewSecretVar(prefix + "-vk-team-only-secret"), IsActive: active, TeamID: &tiggingsTeam, CreatedAt: now, UpdatedAt: now},
+		{ID: prefix + "-vk-outside", Name: "E2E Outside VK", Value: *schemas.NewSecretVar(prefix + "-vk-outside-secret"), IsActive: active, TeamID: &outsideTeam, CreatedAt: now, UpdatedAt: now},
 	} {
 		if err := db.WithContext(ctx).Where("id = ?", vk.ID).Assign(vk).FirstOrCreate(&vk).Error; err != nil {
 			return err
@@ -648,7 +649,7 @@ func seedMCP(ctx context.Context, db *gorm.DB, prefix string, now time.Time) err
 		ClientID:         prefix + "-mcp-client",
 		Name:             "E2E Seed MCP",
 		ConnectionType:   "sse",
-		ConnectionString: schemas.NewEnvVar("https://mcp.e2e.local/sse"),
+		ConnectionString: schemas.NewSecretVar("https://mcp.e2e.local/sse"),
 		ToolsToExecute:   schemas.WhiteList{"*"},
 		CreatedAt:        now,
 		UpdatedAt:        now,

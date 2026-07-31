@@ -90,10 +90,17 @@ func CreateGenAIRouteConfigs(pathPrefix string) []RouteConfig {
 			if requestType, ok := ctx.Value(schemas.BifrostContextKeyHTTPRequestType).(schemas.RequestType); ok && requestType == schemas.BatchCreateRequest && ctx.Value(isGeminiBatchCreateRequestContextKey) != nil {
 				return &gemini.GeminiBatchCreateRequest{}
 			}
+			if requestType, ok := ctx.Value(schemas.BifrostContextKeyHTTPRequestType).(schemas.RequestType); ok && requestType == schemas.CountTokensRequest {
+				return &gemini.GeminiCountTokensRequest{}
+			}
 			return &gemini.GeminiGenerationRequest{}
 		},
 		RequestConverter: func(ctx *schemas.BifrostContext, req interface{}) (*schemas.BifrostRequest, error) {
-			if geminiReq, ok := req.(*gemini.GeminiGenerationRequest); ok {
+			if countTokensReq, ok := req.(*gemini.GeminiCountTokensRequest); ok {
+				return &schemas.BifrostRequest{
+					CountTokensRequest: countTokensReq.ToGeminiGenerationRequest().ToBifrostResponsesRequest(ctx),
+				}, nil
+			} else if geminiReq, ok := req.(*gemini.GeminiGenerationRequest); ok {
 				if geminiReq.IsCountTokens {
 					return &schemas.BifrostRequest{
 						CountTokensRequest: geminiReq.ToBifrostResponsesRequest(ctx),
@@ -378,11 +385,11 @@ func CreateGenAIFileRouteConfigs(pathPrefix string, handlerStore lib.HandlerStor
 				return true, fmt.Errorf("failed to store upload session: %w", err)
 			}
 
-			scheme := "http"
-			if ctx.IsTLS() || string(ctx.Request.Header.Peek("X-Forwarded-Proto")) == "https" {
-				scheme = "https"
+			baseURL := lib.BuildBaseURL(ctx, "")
+			if baseURL == "" {
+				return true, errors.New("cannot determine base URL for upload (empty Host)")
 			}
-			uploadURL := scheme + "://" + string(ctx.Host()) + pathPrefix + "/upload/v1beta/files?upload_id=" + uploadID
+			uploadURL := baseURL + pathPrefix + "/upload/v1beta/files?upload_id=" + uploadID
 
 			ctx.SetStatusCode(fasthttp.StatusOK)
 			ctx.Response.Header.Set("X-Goog-Upload-URL", uploadURL)
@@ -714,9 +721,17 @@ func CreateVertexBatchRouteConfigs(pathPrefix string) []RouteConfig {
 		BatchRequestConverter: func(ctx *schemas.BifrostContext, req interface{}) (*BatchRequest, error) {
 			if job, ok := req.(*vertex.VertexBatchPredictionJob); ok {
 				createReq := vertex.ToBifrostBatchCreateRequest(job)
+				// Provider follows x-model-provider (Vertex by default), set in the PreCallback.
+				if provider, ok := ctx.Value(bifrostContextKeyProvider).(schemas.ModelProvider); ok && provider != "" {
+					createReq.Provider = provider
+				}
 				// The native body is already a Vertex BatchPredictionJob; carry it verbatim
 				// so BigQuery IO, non-JSONL formats and multi-URI inputs round-trip losslessly.
+				// Only passthrough when routing to Vertex (the only provider for this body shape).
 				createReq.RawRequestBody = getGenAIRawRequestBody(ctx)
+				if createReq.Provider == schemas.Vertex && len(createReq.RawRequestBody) > 0 {
+					ctx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+				}
 				return &BatchRequest{
 					Type:          schemas.BatchCreateRequest,
 					CreateRequest: createReq,
@@ -733,10 +748,11 @@ func CreateVertexBatchRouteConfigs(pathPrefix string) []RouteConfig {
 		ErrorConverter: func(ctx *schemas.BifrostContext, err *schemas.BifrostError) interface{} {
 			return gemini.ToGeminiError(err)
 		},
-		// Native Vertex batch bodies pass through verbatim (see RawRequestBody above).
+		// Resolve the provider from x-model-provider (Vertex by default) and capture the
+		// native body so the converter can override the provider and gate passthrough on Vertex.
 		PreCallback: func(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.BifrostContext, req interface{}) error {
+			bifrostCtx.SetValue(bifrostContextKeyProvider, getProviderFromHeader(ctx, schemas.Vertex))
 			setGenAIRawRequestBodyFromRequest(ctx, bifrostCtx)
-			bifrostCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 			return nil
 		},
 	})
@@ -869,9 +885,12 @@ func extractVertexBatchPathParams(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.
 	batchID, _ := ctx.UserValue("batch_id").(string)
 	batchID = strings.TrimSuffix(batchID, ":cancel")
 
+	// Provider follows x-model-provider (Vertex by default for these native routes).
+	provider := getProviderFromHeader(ctx, schemas.Vertex)
+
 	switch r := req.(type) {
 	case *schemas.BifrostBatchListRequest:
-		r.Provider = schemas.Vertex
+		r.Provider = provider
 		if pageSizeStr := string(ctx.QueryArgs().Peek("pageSize")); pageSizeStr != "" {
 			if pageSize, err := strconv.Atoi(pageSizeStr); err == nil {
 				r.Limit = pageSize
@@ -884,19 +903,19 @@ func extractVertexBatchPathParams(ctx *fasthttp.RequestCtx, bifrostCtx *schemas.
 		if batchID == "" {
 			return errors.New("batch_id is required")
 		}
-		r.Provider = schemas.Vertex
+		r.Provider = provider
 		r.BatchID = batchID
 	case *schemas.BifrostBatchCancelRequest:
 		if batchID == "" {
 			return errors.New("batch_id is required")
 		}
-		r.Provider = schemas.Vertex
+		r.Provider = provider
 		r.BatchID = batchID
 	case *schemas.BifrostBatchDeleteRequest:
 		if batchID == "" {
 			return errors.New("batch_id is required")
 		}
-		r.Provider = schemas.Vertex
+		r.Provider = provider
 		r.BatchID = batchID
 	}
 	return nil
@@ -1423,6 +1442,14 @@ func extractAndSetModelAndRequestType(ctx *fasthttp.RequestCtx, bifrostCtx *sche
 	// Determine the effective provider: the x-model-provider header takes precedence,
 	effectiveProvider, _ := schemas.ParseModelString(modelStr, provider)
 
+	// Only passthrough when Gemini is explicitly selected (gemini/ prefix or
+	// x-model-provider: gemini) — never on the silent default, since a bare model
+	// may resolve to Vertex (no Vertex passthrough) or another provider entirely.
+	headerProvider := getProviderFromHeader(ctx, "")
+	prefixProvider, _ := schemas.ParseModelString(modelStr, "")
+	explicitGemini := effectiveProvider == schemas.Gemini &&
+		(headerProvider == schemas.Gemini || prefixProvider == schemas.Gemini)
+
 	headers := extractHeadersFromRequest(ctx)
 	schemas.ExtractAndSetUserAgentFromHeaders(headers, bifrostCtx)
 
@@ -1461,11 +1488,20 @@ func extractAndSetModelAndRequestType(ctx *fasthttp.RequestCtx, bifrostCtx *sche
 			r.IsImageGeneration = (isImagenPredict && !isImageEditRequest(r)) || isImageGenerationRequest(r)
 			r.IsImageEdit = isImageEditRequest(r)
 		}
-		if !r.IsEmbedding && effectiveProvider == schemas.Gemini {
+		if !r.IsEmbedding && explicitGemini {
 			setGenAIRawRequestBodyFromRequest(ctx, bifrostCtx)
 			bifrostCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 		}
 
+		return nil
+	case *gemini.GeminiCountTokensRequest:
+		if modelStr != "" {
+			r.Model = modelStr
+		}
+		if explicitGemini {
+			setGenAIRawRequestBodyFromRequest(ctx, bifrostCtx)
+			bifrostCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
+		}
 		return nil
 	case *gemini.GeminiEmbeddingRequest:
 		if modelStr != "" {
@@ -1476,7 +1512,7 @@ func extractAndSetModelAndRequestType(ctx *fasthttp.RequestCtx, bifrostCtx *sche
 		if modelStr != "" {
 			r.Model = modelStr
 		}
-		if effectiveProvider == schemas.Gemini {
+		if explicitGemini {
 			setGenAIRawRequestBodyFromRequest(ctx, bifrostCtx)
 			bifrostCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 		}
@@ -1485,7 +1521,7 @@ func extractAndSetModelAndRequestType(ctx *fasthttp.RequestCtx, bifrostCtx *sche
 		if modelStr != "" {
 			r.Model = modelStr
 		}
-		if effectiveProvider == schemas.Gemini {
+		if explicitGemini {
 			setGenAIRawRequestBodyFromRequest(ctx, bifrostCtx)
 			bifrostCtx.SetValue(schemas.BifrostContextKeyUseRawRequestBody, true)
 		}

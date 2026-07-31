@@ -27,6 +27,13 @@ func (mc *ModelCatalog) GetSupportedParameters(model string) []string {
 	return mc.datasheet.GetSupportedParameters(model)
 }
 
+// ResolveModelParameters reads the model-parameters row for model, resolving
+// provider-qualified or bare aliases to the datasheet's stored key (exact →
+// provider-prefix-stripped → base model → provider-qualified variants).
+func (mc *ModelCatalog) ResolveModelParameters(ctx context.Context, model string) (*configstoreTables.TableModelParameters, error) {
+	return mc.datasheet.ResolveModelParameters(ctx, model)
+}
+
 func (mc *ModelCatalog) IsTextCompletionSupported(model string, provider schemas.ModelProvider) bool {
 	return mc.datasheet.IsTextCompletionSupported(model, provider)
 }
@@ -40,6 +47,13 @@ func (mc *ModelCatalog) GetPricingEntryForModel(model string, provider schemas.M
 // CalculateCost computes the dollar cost for a Bifrost response.
 func (mc *ModelCatalog) CalculateCost(result *schemas.BifrostResponse, scopes *PricingLookupScopes) float64 {
 	return mc.datasheet.CalculateCost(result, (*datasheet.LookupScopes)(scopes))
+}
+
+// CalculateCostForUsage computes the dollar cost from a bare usage object when
+// no full BifrostResponse is available — used to bill partial usage carried on
+// a failed/cancelled request (BifrostError.ExtraFields.BilledUsage).
+func (mc *ModelCatalog) CalculateCostForUsage(usage *schemas.BifrostLLMUsage, provider schemas.ModelProvider, model string, requestType schemas.RequestType, scopes *PricingLookupScopes) float64 {
+	return mc.datasheet.CalculateCostForUsage(usage, provider, model, requestType, (*datasheet.LookupScopes)(scopes))
 }
 
 // UpsertModelPricingAttributes writes additional_attributes for every row

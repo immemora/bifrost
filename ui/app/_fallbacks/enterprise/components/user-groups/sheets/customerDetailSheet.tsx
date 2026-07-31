@@ -1,3 +1,4 @@
+import { CopyableId } from "@/components/copyableId";
 import { Label } from "@/components/ui/label";
 import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { resetDurationLabels } from "@/lib/constants/governance";
@@ -30,7 +31,6 @@ function DetailCard({ title, children, contentClassName }: { title: string; chil
 		</div>
 	);
 }
-
 
 function BudgetLineBar({ current, max, resetDuration }: { current: number; max: number; resetDuration?: string }) {
 	const pct = max > 0 ? Math.min((current / max) * 100, 100) : 0;
@@ -84,7 +84,6 @@ function RateLimitBar({ label, current, max, resetDuration }: { label: string; c
 	);
 }
 
-
 //
 // OSS fallback for the enterprise CustomerDetailSheet. It renders the Info,
 // Budgets, and Rate Limits sections from the customer already in hand, and omits
@@ -99,7 +98,10 @@ export function CustomerDetailSheet({ customer, open, onOpenChange }: Props) {
 		<Sheet open={open} onOpenChange={onOpenChange}>
 			<SheetContent className="max-w-[700px] overflow-y-auto p-0 pt-4">
 				<SheetHeader className="flex flex-col items-start px-0 py-4" headerClassName="mb-0 px-8 sticky -top-4 bg-card z-10">
-					<SheetTitle className="text-lg">{customer?.name || "Customer Details"}</SheetTitle>
+					<div className="flex min-w-0 items-center gap-1">
+						<SheetTitle className="truncate text-lg">{customer?.name || "Customer Details"}</SheetTitle>
+						{customer?.id && <CopyableId id={customer.id} entityLabel="Customer" />}
+					</div>
 					<SheetDescription>Usage details for this customer.</SheetDescription>
 				</SheetHeader>
 

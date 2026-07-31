@@ -1,7 +1,7 @@
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdownMenu";
-import { Status, StatusBarColors, Statuses } from "@/lib/constants/logs";
+import { mapAppToClientApp, mapUserAgentToApp, Status, StatusBarColors, Statuses } from "@/lib/constants/logs";
 import type { MCPToolLogEntry } from "@/lib/types/logs";
 import { ColumnDef, Row } from "@tanstack/react-table";
 import { format, isValid } from "date-fns";
@@ -20,6 +20,7 @@ const getValidatedStatus = (status: string): Status => {
 export const createMCPColumns = (
 	handleDelete: (log: MCPToolLogEntry) => Promise<void>,
 	hasDeleteAccess: boolean,
+	customAppIcons: Record<string, string> = {},
 ): ColumnDef<MCPToolLogEntry>[] => [
 	{
 		accessorKey: "status",
@@ -71,6 +72,22 @@ export const createMCPColumns = (
 		},
 	},
 	{
+		id: "app",
+		accessorKey: "app",
+		header: "App",
+		size: 140,
+		cell: ({ row }) => {
+			const app = row.original.app ? mapAppToClientApp(row.original.app) : mapUserAgentToApp(row.original.user_agent);
+			const icon = row.original.app ? customAppIcons[row.original.app] || app.icon : app.icon;
+			return (
+				<div className="flex min-w-0 items-center gap-2" title={row.original.user_agent || undefined}>
+					{icon ? <img src={icon} alt={app.name} width={14} height={14} loading="lazy" decoding="async" /> : null}
+					<span className="truncate text-[12px]">{app.name}</span>
+				</div>
+			);
+		},
+	},
+	{
 		accessorKey: "latency",
 		header: ({ column }) => (
 			<Button variant="ghost" onClick={() => column.toggleSorting(column.getIsSorted() === "asc")}>
@@ -94,6 +111,15 @@ export const createMCPColumns = (
 			const cost = row.original.cost;
 			const isValidNumber = typeof cost === "number" && Number.isFinite(cost);
 			return <div className="font-mono text-sm">{isValidNumber ? `${cost.toFixed(4)}` : "N/A"}</div>;
+		},
+	},
+	{
+		id: "virtual_key",
+		header: "Virtual Key",
+		size: 170,
+		cell: ({ row }) => {
+			const value = row.original.virtual_key?.name ?? row.original.virtual_key_name ?? row.original.virtual_key_id;
+			return <div className="max-w-[180px] truncate font-mono text-xs">{value || "-"}</div>;
 		},
 	},
 	...(hasDeleteAccess

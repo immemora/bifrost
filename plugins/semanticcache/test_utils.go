@@ -103,12 +103,12 @@ func getWeaviateConfigFromEnv() vectorstore.WeaviateConfig {
 	if scheme == "" {
 		scheme = "http"
 	}
-	host := schemas.NewEnvVar("env.WEAVIATE_HOST")
+	host := schemas.NewSecretVar("env.WEAVIATE_HOST")
 	if host.GetValue() == "" {
-		host = schemas.NewEnvVar("localhost:9000")
+		host = schemas.NewSecretVar("localhost:9000")
 	}
 
-	apiKey := schemas.NewEnvVar("env.WEAVIATE_API_KEY")
+	apiKey := schemas.NewSecretVar("env.WEAVIATE_API_KEY")
 
 	timeoutStr := os.Getenv("WEAVIATE_TIMEOUT")
 	timeout := 30 // default
@@ -128,13 +128,13 @@ func getWeaviateConfigFromEnv() vectorstore.WeaviateConfig {
 
 // getRedisConfigFromEnv retrieves Redis configuration from environment variables
 func getRedisConfigFromEnv() vectorstore.RedisConfig {
-	addr := schemas.NewEnvVar("env.REDIS_ADDR")
+	addr := schemas.NewSecretVar("env.REDIS_ADDR")
 	if addr.GetValue() == "" {
-		addr = schemas.NewEnvVar("localhost:6379")
+		addr = schemas.NewSecretVar("localhost:6379")
 	}
-	username := schemas.NewEnvVar("env.REDIS_USERNAME")
-	password := schemas.NewEnvVar("env.REDIS_PASSWORD")
-	db := schemas.NewEnvVar("env.REDIS_DB")
+	username := schemas.NewSecretVar("env.REDIS_USERNAME")
+	password := schemas.NewSecretVar("env.REDIS_PASSWORD")
+	db := schemas.NewSecretVar("env.REDIS_DB")
 
 	timeoutStr := os.Getenv("REDIS_TIMEOUT")
 	if timeoutStr == "" {
@@ -156,18 +156,18 @@ func getRedisConfigFromEnv() vectorstore.RedisConfig {
 
 // getQdrantConfigFromEnv retrieves Qdrant configuration from environment variables
 func getQdrantConfigFromEnv() vectorstore.QdrantConfig {
-	host := schemas.NewEnvVar("env.QDRANT_HOST")
+	host := schemas.NewSecretVar("env.QDRANT_HOST")
 	if host.GetValue() == "" {
-		host = schemas.NewEnvVar("localhost")
+		host = schemas.NewSecretVar("localhost")
 	}
-	port := schemas.NewEnvVar("env.QDRANT_PORT")
+	port := schemas.NewSecretVar("env.QDRANT_PORT")
 	if port.GetValue() == "" {
-		port = schemas.NewEnvVar("6334")
+		port = schemas.NewSecretVar("6334")
 	}
-	apiKey := schemas.NewEnvVar("env.QDRANT_API_KEY")
-	useTLS := schemas.NewEnvVar("env.QDRANT_USE_TLS")
+	apiKey := schemas.NewSecretVar("env.QDRANT_API_KEY")
+	useTLS := schemas.NewSecretVar("env.QDRANT_USE_TLS")
 	if useTLS.GetValue() == "" {
-		useTLS = schemas.NewEnvVar("false")
+		useTLS = schemas.NewSecretVar("false")
 	}
 
 	return vectorstore.QdrantConfig{
@@ -180,13 +180,13 @@ func getQdrantConfigFromEnv() vectorstore.QdrantConfig {
 
 // getPineconeConfigFromEnv retrieves Pinecone configuration from environment variables
 func getPineconeConfigFromEnv() vectorstore.PineconeConfig {
-	apiKey := schemas.NewEnvVar("env.PINECONE_API_KEY")
+	apiKey := schemas.NewSecretVar("env.PINECONE_API_KEY")
 	if apiKey.GetValue() == "" {
-		apiKey = schemas.NewEnvVar("pclocal") // Pinecone Local doesn't validate API keys
+		apiKey = schemas.NewSecretVar("pclocal") // Pinecone Local doesn't validate API keys
 	}
-	indexHost := schemas.NewEnvVar("env.PINECONE_INDEX_HOST")
+	indexHost := schemas.NewSecretVar("env.PINECONE_INDEX_HOST")
 	if indexHost.GetValue() == "" {
-		indexHost = schemas.NewEnvVar("localhost:5081") // Pinecone Local default port
+		indexHost = schemas.NewSecretVar("localhost:5081") // Pinecone Local default port
 	}
 
 	return vectorstore.PineconeConfig{
@@ -224,7 +224,7 @@ func (baseAccount *BaseAccount) GetConfiguredProviders() ([]schemas.ModelProvide
 func (baseAccount *BaseAccount) GetKeysForProvider(ctx context.Context, providerKey schemas.ModelProvider) ([]schemas.Key, error) {
 	return []schemas.Key{
 		{
-			Value:  *schemas.NewEnvVar("env.OPENAI_API_KEY"),
+			Value:  *schemas.NewSecretVar("env.OPENAI_API_KEY"),
 			Models: schemas.WhiteList{"*"}, // "*" means allow all models
 			Weight: 1.0,
 		},
@@ -433,7 +433,12 @@ func getMockRules() []mocker.MockRule {
 }
 
 // getMockedBifrostClient creates a Bifrost client with a mocker plugin for testing
-func getMockedBifrostClient(t *testing.T, ctx *schemas.BifrostContext, logger schemas.Logger, semanticCachePlugin schemas.LLMPlugin) *bifrost.Bifrost {
+// extraPlugins, when given, are inserted between semanticCachePlugin and the
+// mocker plugin — e.g. a test-local plugin that short-circuits with a real
+// multi-chunk stream (see chunkStreamPlugin) where the mocker's single-shot
+// Response short-circuit can't exercise the case being tested. Any request
+// an extra plugin doesn't handle falls through to mocker as usual.
+func getMockedBifrostClient(t *testing.T, ctx *schemas.BifrostContext, logger schemas.Logger, semanticCachePlugin schemas.LLMPlugin, extraPlugins ...schemas.LLMPlugin) *bifrost.Bifrost {
 	mockerCfg := mocker.MockerConfig{
 		Enabled: true,
 		Rules:   getMockRules(),
@@ -444,10 +449,13 @@ func getMockedBifrostClient(t *testing.T, ctx *schemas.BifrostContext, logger sc
 		t.Fatalf("Failed to initialize mocker plugin: %v", err)
 	}
 
+	llmPlugins := append([]schemas.LLMPlugin{semanticCachePlugin}, extraPlugins...)
+	llmPlugins = append(llmPlugins, mockerPlugin)
+
 	account := &BaseAccount{}
 	client, err := bifrost.Init(ctx, schemas.BifrostConfig{
 		Account:    account,
-		LLMPlugins: []schemas.LLMPlugin{semanticCachePlugin, mockerPlugin},
+		LLMPlugins: llmPlugins,
 		Logger:     logger,
 	})
 	if err != nil {
@@ -506,8 +514,9 @@ func ensureSharedTestNamespace(ctx context.Context, store vectorstore.VectorStor
 	return sharedTestNamespaceErr
 }
 
-// NewTestSetupWithVectorStore creates a new test setup with custom configuration and vector store type
-func NewTestSetupWithVectorStore(t *testing.T, config *Config, storeType vectorstore.VectorStoreType) *TestSetup {
+// NewTestSetupWithVectorStore creates a new test setup with custom configuration and vector store type.
+// extraPlugins are forwarded to getMockedBifrostClient — see its doc comment.
+func NewTestSetupWithVectorStore(t *testing.T, config *Config, storeType vectorstore.VectorStoreType, extraPlugins ...schemas.LLMPlugin) *TestSetup {
 	ctx := schemas.NewBifrostContext(context.Background(), schemas.NoDeadline)
 	logger := bifrost.NewDefaultLogger(schemas.LogLevelDebug)
 
@@ -550,7 +559,7 @@ func NewTestSetupWithVectorStore(t *testing.T, config *Config, storeType vectors
 	clearTestKeysWithStore(t, pluginImpl.store)
 
 	// Get a mocked Bifrost client
-	client := getMockedBifrostClient(t, ctx, logger, plugin)
+	client := getMockedBifrostClient(t, ctx, logger, plugin, extraPlugins...)
 
 	// Wire the global client as the embedding executor so semantic search works.
 	pluginImpl.SetEmbeddingRequestExecutor(throttledEmbeddingExecutor(client.EmbeddingRequest))

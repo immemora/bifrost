@@ -5,10 +5,14 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"net"
+	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
+	bifrost "github.com/maximhq/bifrost/core"
 	"github.com/maximhq/bifrost/core/schemas"
 	"github.com/maximhq/bifrost/transports/bifrost-http/lib"
 	"github.com/valyala/fasthttp"
@@ -111,13 +115,32 @@ func SendError(ctx *fasthttp.RequestCtx, statusCode int, message string) {
 
 // SendBifrostError sends a BifrostError response
 func SendBifrostError(ctx *fasthttp.RequestCtx, bifrostErr *schemas.BifrostError) {
+	bifrostErr = lib.SanitizeBifrostErrorForClient(bifrostErr)
+	if bifrostErr == nil {
+		SendError(ctx, fasthttp.StatusInternalServerError, lib.ClientSafeInternalErrorMessage)
+		return
+	}
+
 	if bifrostErr.StatusCode != nil {
 		ctx.SetStatusCode(*bifrostErr.StatusCode)
 	} else if !bifrostErr.IsBifrostError {
 		ctx.SetStatusCode(fasthttp.StatusBadRequest)
 	} else {
-		ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		if bifrostErr.Error != nil &&
+			(bifrostErr.Error.Message == bifrost.ProviderAutoResolveErrorMessage ||
+				bifrostErr.Error.Message == bifrost.ModelAutoResolveErrorMessage) {
+			ctx.SetStatusCode(fasthttp.StatusBadRequest)
+		} else {
+			ctx.SetStatusCode(fasthttp.StatusInternalServerError)
+		}
 	}
+
+	// Routed-identity headers from the error itself (provider/model/request-type +
+	// routing_info incl. is-fallback). Callers forward provider headers before this,
+	// so bifrost identity wins. No bifrostCtx here, so the ctx-only fallback-index /
+	// upstream-latency headers are omitted on native errors — the routing_info-*
+	// headers still carry which provider ran and whether a fallback fired.
+	lib.ApplyBifrostErrorResponseHeaders(ctx, nil, bifrostErr.ExtraFields)
 
 	ctx.SetContentType("application/json")
 	if encodeErr := json.NewEncoder(ctx).Encode(bifrostErr); encodeErr != nil {
@@ -188,18 +211,34 @@ func IsOriginAllowed(origin string, allowedOrigins []string) bool {
 	return false
 }
 
-// isLocalhostOrigin checks if the given origin is a localhost origin
+// isLocalhostOrigin checks if the given origin is a localhost origin.
+// Covers hostname "localhost" plus IPv4/IPv6 loopback and unspecified
+// literals (127.0.0.1, ::1, 0.0.0.0, ::), bracketed or not.
 func isLocalhostOrigin(origin string) bool {
-	return strings.HasPrefix(origin, "http://localhost:") ||
-		strings.HasPrefix(origin, "https://localhost:") ||
-		strings.HasPrefix(origin, "http://127.0.0.1:") ||
-		strings.HasPrefix(origin, "http://0.0.0.0:") ||
-		strings.HasPrefix(origin, "https://127.0.0.1:")
+	parsed, err := url.Parse(origin)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return false
+	}
+	host := parsed.Hostname() // unwraps IPv6 brackets
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
 }
+
+// wildcardRegexpCache caches compiled regexps for wildcard origin patterns.
+// The set of patterns is small (typically 1-5) and append-only, making sync.Map
+// ideal: lock-free reads on the hot path, no coordination with config reloads.
+var wildcardRegexpCache sync.Map // map[string]*regexp.Regexp
 
 // matchesWildcardPattern checks if an origin matches a wildcard pattern.
 // Supports patterns like *.example.com, https://*.example.com, or http://*.example.com
 func matchesWildcardPattern(origin string, pattern string) bool {
+	if v, ok := wildcardRegexpCache.Load(pattern); ok {
+		return v.(*regexp.Regexp).MatchString(origin)
+	}
+
 	// Convert wildcard pattern to regex pattern
 	// Escape special regex characters except *
 	regexPattern := regexp.QuoteMeta(pattern)
@@ -209,13 +248,13 @@ func matchesWildcardPattern(origin string, pattern string) bool {
 	// Anchor the pattern to match the entire origin
 	regexPattern = "^" + regexPattern + "$"
 
-	// Compile and test the regex
 	re, err := regexp.Compile(regexPattern)
 	if err != nil {
 		return false
 	}
 
-	return re.MatchString(origin)
+	actual, _ := wildcardRegexpCache.LoadOrStore(pattern, re)
+	return actual.(*regexp.Regexp).MatchString(origin)
 }
 
 // ParseModel parses a model string in the format "provider/model" or "provider/nested/model"

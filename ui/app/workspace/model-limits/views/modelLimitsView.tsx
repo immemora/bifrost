@@ -1,7 +1,8 @@
-import { getErrorMessage, useGetModelConfigsQuery, useGetProvidersQuery } from "@/lib/store";
+import FullPageLoader from "@/components/fullPageLoader";
 import { useDebouncedValue } from "@/hooks/useDebounce";
+import { getErrorMessage, useGetModelConfigsQuery, useGetProvidersQuery } from "@/lib/store";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import ModelLimitsTable from "./modelLimitsTable";
 
@@ -25,7 +26,11 @@ export default function ModelLimitsView() {
 
 	const { data: providers } = useGetProvidersQuery();
 
-	const { data: modelConfigsData, error: modelConfigsError } = useGetModelConfigsQuery(
+	const {
+		data: modelConfigsData,
+		error: modelConfigsError,
+		isLoading: isModelConfigsLoading,
+	} = useGetModelConfigsQuery(
 		{
 			limit: PAGE_SIZE,
 			offset,
@@ -38,6 +43,9 @@ export default function ModelLimitsView() {
 			pollingInterval: POLLING_INTERVAL,
 		},
 	);
+
+	const hasLoadedOnceRef = useRef(false);
+	if (modelConfigsData || modelConfigsError) hasLoadedOnceRef.current = true;
 
 	const totalCount = modelConfigsData?.total_count ?? 0;
 
@@ -54,23 +62,30 @@ export default function ModelLimitsView() {
 		}
 	}, [modelConfigsError]);
 
+	// The table chrome renders "Loading limits..." while the first request is in
+	// flight, then collapses to the full-page empty state once it resolves to zero
+	// rows — a visible flash. Hold a plain loader until the first response lands.
+	// Subsequent filter/page fetches keep the table so the chrome doesn't jump.
+	if (isModelConfigsLoading && !hasLoadedOnceRef.current) {
+		return <FullPageLoader />;
+	}
+
 	return (
-		<div className="mx-auto w-full max-w-7xl">
-			<ModelLimitsTable
-				modelConfigs={modelConfigsData?.model_configs || []}
-				totalCount={modelConfigsData?.total_count || 0}
-				providers={providers ?? []}
-				search={search}
-				debouncedSearch={debouncedSearch}
-				onSearchChange={setSearch}
-				scope={scope}
-				onScopeChange={setScope}
-				provider={provider}
-				onProviderChange={setProvider}
-				offset={offset}
-				limit={PAGE_SIZE}
-				onOffsetChange={setOffset}
-			/>
-		</div>
+		<ModelLimitsTable
+			modelConfigs={modelConfigsData?.model_configs || []}
+			totalCount={modelConfigsData?.total_count || 0}
+			providers={providers ?? []}
+			search={search}
+			debouncedSearch={debouncedSearch}
+			onSearchChange={setSearch}
+			scope={scope}
+			onScopeChange={setScope}
+			provider={provider}
+			onProviderChange={setProvider}
+			offset={offset}
+			limit={PAGE_SIZE}
+			onOffsetChange={setOffset}
+			isLoading={isModelConfigsLoading}
+		/>
 	);
 }

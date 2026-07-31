@@ -3,19 +3,61 @@ package logstore
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 )
 
+// TestMigrationAddMCPRedactionMappingColumn verifies the MCP mapping column is additive, idempotent, and preserves existing rows.
+func TestMigrationAddMCPRedactionMappingColumn(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "migrations.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, db.Exec("CREATE TABLE mcp_tool_logs (id TEXT PRIMARY KEY)").Error)
+	require.NoError(t, db.Exec("INSERT INTO mcp_tool_logs (id) VALUES (?)", "mcp-existing").Error)
+
+	ctx := context.Background()
+	require.NoError(t, migrationAddMCPRedactionMappingColumn(ctx, db, testLogger{}))
+	require.True(t, db.Migrator().HasColumn(&MCPToolLog{}, "RedactionMapping"))
+	require.NoError(t, migrationAddMCPRedactionMappingColumn(ctx, db, testLogger{}))
+
+	var count int64
+	require.NoError(t, db.Table("mcp_tool_logs").Where("id = ?", "mcp-existing").Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
+// TestMigrationAddMCPPluginLogsColumn verifies the MCP plugin-log column is additive, idempotent, and preserves existing rows.
+func TestMigrationAddMCPPluginLogsColumn(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(filepath.Join(t.TempDir(), "migrations.db")), &gorm.Config{Logger: logger.Default.LogMode(logger.Silent)})
+	require.NoError(t, err)
+	require.NoError(t, db.Exec("CREATE TABLE mcp_tool_logs (id TEXT PRIMARY KEY)").Error)
+	require.NoError(t, db.Exec("INSERT INTO mcp_tool_logs (id) VALUES (?)", "mcp-existing").Error)
+
+	ctx := context.Background()
+	require.NoError(t, migrationAddMCPPluginLogsColumn(ctx, db, testLogger{}))
+	require.True(t, db.Migrator().HasColumn(&MCPToolLog{}, "PluginLogs"))
+	require.NoError(t, migrationAddMCPPluginLogsColumn(ctx, db, testLogger{}))
+
+	var count int64
+	require.NoError(t, db.Table("mcp_tool_logs").Where("id = ?", "mcp-existing").Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
+// pgTestSchema is this package's dedicated Postgres schema. Test packages
+// (configstore, configstore/tables, logstore) run in parallel against the same
+// database, so each one works in its own schema to avoid clobbering the
+// others' tables and rows.
+const pgTestSchema = "logstore_test"
+
 // postgresDSN matches the postgres service in tests/docker-compose.yml and
 // framework/docker-compose.yml.
-const postgresDSN = "host=localhost user=bifrost password=bifrost_password dbname=bifrost port=5432 sslmode=disable"
+const postgresDSN = "host=localhost user=bifrost password=bifrost_password dbname=bifrost port=5432 sslmode=disable search_path=" + pgTestSchema
 
 // trySetupPostgresDB attempts to connect to Postgres and returns the connection.
 // Returns nil if Postgres is unavailable.
@@ -34,6 +76,12 @@ func trySetupPostgresDB(t *testing.T) *gorm.DB {
 		return nil
 	}
 	if err := sqlDB.Ping(); err != nil {
+		return nil
+	}
+
+	// All objects live in this package's dedicated schema (via search_path in
+	// the DSN), isolated from other test packages sharing the same database.
+	if err := db.Exec("CREATE SCHEMA IF NOT EXISTS " + pgTestSchema).Error; err != nil {
 		return nil
 	}
 
@@ -159,7 +207,7 @@ func TestMigrationAddMetadataGINIndex_ValidJSON(t *testing.T) {
 	t.Cleanup(func() { _ = conn.Close() })
 
 	// Run the migration (cleanup only) then ensure the index is built.
-	err = migrationAddMetadataGINIndex(ctx, db)
+	err = migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Migration should succeed")
 	err = ensureMetadataGINIndex(ctx, conn)
 	require.NoError(t, err, "GIN index creation should succeed")
@@ -231,7 +279,7 @@ func TestMigrationAddMetadataGINIndex_InvalidJSON(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	// Run the migration (cleanup only) then ensure the index is built.
-	err = migrationAddMetadataGINIndex(ctx, db)
+	err = migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Migration should succeed even with invalid JSON")
 	err = ensureMetadataGINIndex(ctx, conn)
 	require.NoError(t, err, "GIN index creation should succeed after invalid JSON cleanup")
@@ -269,7 +317,7 @@ func TestMigrationAddMetadataGINIndex_MixedData(t *testing.T) {
 	insertTestLog(t, db, "log-mixed-null", nil)
 
 	// Run the migration (cleanup only) then ensure the index is built.
-	err := migrationAddMetadataGINIndex(ctx, db)
+	err := migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Migration should succeed")
 
 	sqlDB, err := db.DB()
@@ -316,7 +364,7 @@ func TestMigrationAddMetadataGINIndex_Idempotent(t *testing.T) {
 	insertTestLog(t, db, "log-idempotent", &validJSON)
 
 	// Run the migration (cleanup only) then ensure the index is built.
-	err := migrationAddMetadataGINIndex(ctx, db)
+	err := migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "First migration should succeed")
 
 	sqlDB, err := db.DB()
@@ -341,7 +389,7 @@ func TestMigrationAddMetadataGINIndex_Idempotent(t *testing.T) {
 	assert.Equal(t, validJSON, *meta1)
 
 	// Run the migration second time (should be idempotent due to gomigrate tracking)
-	err = migrationAddMetadataGINIndex(ctx, db)
+	err = migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Second migration should succeed (idempotent)")
 	err = ensureMetadataGINIndex(ctx, conn)
 	require.NoError(t, err, "ensureMetadataGINIndex should be a no-op when index already exists")
@@ -365,7 +413,7 @@ func TestMigrationAddMetadataGINIndex_EmptyTable(t *testing.T) {
 	ctx := context.Background()
 
 	// Run the migration (cleanup only) then ensure the index is built.
-	err := migrationAddMetadataGINIndex(ctx, db)
+	err := migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Migration should succeed on empty table")
 
 	sqlDB, err := db.DB()
@@ -410,7 +458,7 @@ func TestMigrationAddMetadataGINIndex_EdgeCases(t *testing.T) {
 	insertTestLog(t, db, "log-edge-scientific", &scientificNotation)
 
 	// Run the migration (cleanup only) then ensure the index is built.
-	err := migrationAddMetadataGINIndex(ctx, db)
+	err := migrationAddMetadataGINIndex(ctx, db, testLogger{})
 	require.NoError(t, err, "Migration should succeed")
 
 	sqlDB, err := db.DB()

@@ -163,6 +163,23 @@ func TestGovernanceStore_CheckBudget_SingleBudget(t *testing.T) {
 	}
 }
 
+// TestGovernanceStoreCheckBudgetUsesOverride verifies enforcement reads the additive effective limit.
+func TestGovernanceStoreCheckBudgetUsesOverride(t *testing.T) {
+	store, err := NewLocalGovernanceStore(context.Background(), NewMockLogger(), nil, &configstore.GovernanceConfig{}, nil)
+	require.NoError(t, err)
+	budget := buildBudgetWithUsage("override-budget", 100, 110, "1d")
+	require.NoError(t, budget.SetOverride(25, configstoreTables.BudgetOverrideModeCycles, 2))
+
+	decision, err := store.CheckBudget(context.Background(), EntityWiseBudgets{"VirtualKey": {budget}}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, DecisionAllow, decision)
+
+	decision, err = store.CheckBudget(context.Background(), EntityWiseBudgets{"VirtualKey": {budget}}, map[string]float64{budget.ID: 15})
+	require.Error(t, err)
+	assert.Equal(t, DecisionBudgetExceeded, decision)
+	assert.Contains(t, err.Error(), "125.0000 dollars")
+}
+
 // TestGovernanceStore_CheckBudget_HierarchyValidation tests multi-level budget hierarchy
 func TestGovernanceStore_CheckBudget_HierarchyValidation(t *testing.T) {
 	logger := NewMockLogger()
@@ -656,7 +673,7 @@ func TestGovernanceStore_UpdateVirtualKeyInMemory_RotatedValueRemovesOldLookup(t
 	require.NoError(t, err)
 
 	updated := *vk
-	updated.Value = "sk-bf-new"
+	updated.Value = *schemas.NewSecretVar("sk-bf-new")
 	store.UpdateVirtualKeyInMemory(context.Background(), &updated, nil, nil, nil)
 
 	oldVK, oldFound := store.GetVirtualKey(context.Background(), "sk-bf-old")
@@ -738,7 +755,7 @@ func TestGovernanceStore_ResetExpiredRateLimits(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reset expired rate limits
-	expiredRateLimits := store.ResetExpiredRateLimitsInMemory(context.Background())
+	expiredRateLimits := store.ResetExpiredRateLimitsInMemory(context.Background(), true)
 	err = store.ResetExpiredRateLimits(context.Background(), expiredRateLimits)
 	assert.NoError(t, err, "Reset should succeed")
 
@@ -773,7 +790,7 @@ func TestGovernanceStore_ResetExpiredBudgets(t *testing.T) {
 	require.NoError(t, err)
 
 	// Reset expired budgets
-	expiredBudgets := store.ResetExpiredBudgetsInMemory(context.Background())
+	expiredBudgets := store.ResetExpiredBudgetsInMemory(context.Background(), true)
 	err = store.ResetExpiredBudgets(context.Background(), expiredBudgets)
 	assert.NoError(t, err, "Reset should succeed")
 
@@ -783,6 +800,88 @@ func TestGovernanceStore_ResetExpiredBudgets(t *testing.T) {
 	require.True(t, len(updatedVK.Budgets) > 0, "VK should have budgets")
 
 	assert.Equal(t, 0.0, updatedVK.Budgets[0].CurrentUsage, "Budget usage should be reset")
+}
+
+// TestGovernanceStoreResetBudgetAdvancesOverride verifies each existing reset consumes one finite cycle.
+func TestGovernanceStoreResetBudgetAdvancesOverride(t *testing.T) {
+	store := newStandaloneStore(t)
+	finite := buildBudgetWithUsage("finite-override", 100, 75, "1d")
+	require.NoError(t, finite.SetOverride(25, configstoreTables.BudgetOverrideModeCycles, 2))
+	store.budgets.Store(finite.ID, finite)
+
+	firstReset := finite.LastReset.Add(24 * time.Hour)
+	reset, ok := store.ResetBudgetAt(context.Background(), finite.ID, firstReset)
+	require.True(t, ok)
+	assert.Zero(t, reset.CurrentUsage)
+	assert.Equal(t, 1, reset.OverrideCyclesRemaining)
+	assert.Equal(t, 125.0, reset.EffectiveMaxLimit())
+
+	secondReset := firstReset.Add(24 * time.Hour)
+	reset, ok = store.ResetBudgetAt(context.Background(), finite.ID, secondReset)
+	require.True(t, ok)
+	assert.False(t, reset.HasActiveOverride())
+	assert.Equal(t, 100.0, reset.EffectiveMaxLimit())
+
+	permanent := buildBudgetWithUsage("forever-override", 100, 75, "1d")
+	require.NoError(t, permanent.SetOverride(50, configstoreTables.BudgetOverrideModeForever, 0))
+	store.budgets.Store(permanent.ID, permanent)
+	reset, ok = store.ResetBudgetAt(context.Background(), permanent.ID, permanent.LastReset.Add(24*time.Hour))
+	require.True(t, ok)
+	assert.True(t, reset.HasActiveOverride())
+	assert.Equal(t, 150.0, reset.EffectiveMaxLimit())
+}
+
+// TestGovernanceStoreUpsertBudgetConfigRefreshesOverride verifies cache refreshes config without clobbering runtime counters.
+func TestGovernanceStoreUpsertBudgetConfigRefreshesOverride(t *testing.T) {
+	store := newStandaloneStore(t)
+	lastReset := time.Now().Add(-30 * time.Minute)
+	live := buildBudgetWithUsage("cache-override", 100, 40, "1h")
+	live.LastReset = lastReset
+	store.budgets.Store(live.ID, live)
+
+	refreshed := buildBudgetWithUsage(live.ID, 120, 0, "2h")
+	require.NoError(t, refreshed.SetOverride(30, configstoreTables.BudgetOverrideModeCycles, 3))
+	store.UpsertBudgetConfig(context.Background(), live.ID, refreshed)
+
+	got := store.LoadBudget(context.Background(), live.ID)
+	require.NotNil(t, got)
+	assert.Equal(t, 40.0, got.CurrentUsage)
+	assert.True(t, got.LastReset.Equal(lastReset))
+	assert.Equal(t, 120.0, got.MaxLimit)
+	assert.Equal(t, "2h", got.ResetDuration)
+	assert.Equal(t, 30.0, got.OverrideAmount)
+	assert.Equal(t, configstoreTables.BudgetOverrideModeCycles, got.OverrideMode)
+	assert.Equal(t, 3, got.OverrideCyclesRemaining)
+}
+
+// TestGovernanceStoreResetPersistsOverrideLifecycle verifies the existing reset write stores the decremented cycle state.
+func TestGovernanceStoreResetPersistsOverrideLifecycle(t *testing.T) {
+	ctx := context.Background()
+	logger := NewMockLogger()
+	configStore, err := configstore.NewConfigStore(ctx, &configstore.Config{
+		Enabled: true,
+		Type:    configstore.ConfigStoreTypeSQLite,
+		Config:  &configstore.SQLiteConfig{Path: t.TempDir() + "/governance.db"},
+	}, logger)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, configStore.Close(ctx)) })
+
+	budget := buildBudgetWithUsage("persisted-override", 100, 75, "1d")
+	require.NoError(t, budget.SetOverride(25, configstoreTables.BudgetOverrideModeCycles, 2))
+	require.NoError(t, configStore.CreateBudget(ctx, budget))
+
+	store, err := NewLocalGovernanceStore(ctx, logger, configStore, nil, nil)
+	require.NoError(t, err)
+	reset, ok := store.ResetBudgetAt(ctx, budget.ID, budget.LastReset.Add(24*time.Hour))
+	require.True(t, ok)
+	require.NoError(t, store.ResetExpiredBudgets(ctx, []*configstoreTables.TableBudget{reset}))
+
+	persisted, err := configStore.GetBudget(ctx, budget.ID)
+	require.NoError(t, err)
+	assert.Zero(t, persisted.CurrentUsage)
+	assert.Equal(t, 25.0, persisted.OverrideAmount)
+	assert.Equal(t, configstoreTables.BudgetOverrideModeCycles, persisted.OverrideMode)
+	assert.Equal(t, 1, persisted.OverrideCyclesRemaining)
 }
 
 // TestGovernanceStore_GetAllBudgets tests retrieving all budgets
@@ -1052,6 +1151,88 @@ func TestGovernanceStore_BudgetStatus(t *testing.T) {
 	status = store.GetBudgetAndRateLimitStatus(context.Background(), "", schemas.ModelProvider("openai"), nil, nil, nil, nil)
 
 	assert.Equal(t, 100.0, status.BudgetPercentUsed)
+}
+
+// TestGetBudgetAndRateLimitStatus_VKScopedModelConfig tests that a VK-scoped model config
+// budget (scope=virtual_key, model="*", provider="openai") is visible to GetBudgetAndRateLimitStatus.
+// This is the regression introduced when the provider-governance migration relocated per-VK
+// provider budgets from vk.ProviderConfigs into governance_model_configs; the status reader
+// was not updated to look in the new location and always returned 0.0%.
+func TestGetBudgetAndRateLimitStatus_VKScopedModelConfig(t *testing.T) {
+	logger := NewMockLogger()
+	vkID := "vk-test-id"
+	vkValue := "vk-test-value"
+	providerName := "openai"
+
+	// Budget at 120% (exceeded) — mirrors the real bug scenario.
+	budget := buildBudgetWithUsage("vk-model-budget", 0.001, 0.0012, "1h")
+
+	// VK-scoped wildcard model config: scope=virtual_key, model="*", provider="openai".
+	// This is exactly the shape the provider-governance migration writes.
+	mc := buildVKScopedModelConfig("mc-vk-openai", configstoreTables.ModelConfigAllModels, &providerName, vkID, budget, nil)
+
+	vk := buildVirtualKey(vkID, vkValue, "test-vk", true)
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		ModelConfigs: []configstoreTables.TableModelConfig{*mc},
+		Budgets:      []configstoreTables.TableBudget{*budget},
+	}, nil)
+	require.NoError(t, err)
+
+	store.virtualKeys.Store(vkValue, vk)
+
+	status := store.GetBudgetAndRateLimitStatus(context.Background(), "gpt-5", schemas.ModelProvider(providerName), vk, nil, nil, nil)
+
+	require.NotNil(t, status)
+	assert.Greater(t, status.BudgetPercentUsed, 100.0, "VK-scoped model budget at 120%% must be visible to routing status")
+}
+
+// TestGetBudgetAndRateLimitStatus_VKScopedModelConfig_NoMatchOtherProvider tests that a
+// VK-scoped model config for one provider does not bleed into status for another provider.
+func TestGetBudgetAndRateLimitStatus_VKScopedModelConfig_NoMatchOtherProvider(t *testing.T) {
+	logger := NewMockLogger()
+	vkID := "vk-test-id"
+	vkValue := "vk-test-value"
+	providerName := "openai"
+
+	budget := buildBudgetWithUsage("vk-model-budget", 0.001, 0.0012, "1h") // exceeded for openai
+	mc := buildVKScopedModelConfig("mc-vk-openai", configstoreTables.ModelConfigAllModels, &providerName, vkID, budget, nil)
+	vk := buildVirtualKey(vkID, vkValue, "test-vk", true)
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		ModelConfigs: []configstoreTables.TableModelConfig{*mc},
+		Budgets:      []configstoreTables.TableBudget{*budget},
+	}, nil)
+	require.NoError(t, err)
+
+	store.virtualKeys.Store(vkValue, vk)
+
+	// Query for anthropic — should not see the openai-scoped budget.
+	status := store.GetBudgetAndRateLimitStatus(context.Background(), "claude-3-5-sonnet", schemas.ModelProvider("anthropic"), vk, nil, nil, nil)
+
+	require.NotNil(t, status)
+	assert.Equal(t, 0.0, status.BudgetPercentUsed, "openai VK-scoped budget must not appear for anthropic requests")
+}
+
+// TestGetBudgetAndRateLimitStatus_GlobalModelConfig tests that a global model+provider
+// config budget is visible to GetBudgetAndRateLimitStatus.
+func TestGetBudgetAndRateLimitStatus_GlobalModelConfig(t *testing.T) {
+	logger := NewMockLogger()
+	providerName := "openai"
+
+	budget := buildBudgetWithUsage("global-model-budget", 100.0, 75.0, "1h") // 75%
+	mc := buildModelConfig("mc-global-openai", "gpt-5", &providerName, budget, nil)
+
+	store, err := NewLocalGovernanceStore(context.Background(), logger, nil, &configstore.GovernanceConfig{
+		ModelConfigs: []configstoreTables.TableModelConfig{*mc},
+		Budgets:      []configstoreTables.TableBudget{*budget},
+	}, nil)
+	require.NoError(t, err)
+
+	status := store.GetBudgetAndRateLimitStatus(context.Background(), "gpt-5", schemas.ModelProvider(providerName), nil, nil, nil, nil)
+
+	require.NotNil(t, status)
+	assert.Equal(t, 75.0, status.BudgetPercentUsed, "global model+provider budget must be visible to routing status")
 }
 
 // TestGovernanceStore_RoutingRules_MultipleScopes tests rules with multiple scopes

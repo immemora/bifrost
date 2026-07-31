@@ -17,6 +17,7 @@ import {
 	useGetLogsHistogramQuery,
 	useGetLogsQuery,
 	useGetLogsStatsQuery,
+	useGetUserAgentMappingsQuery,
 } from "@/lib/store";
 import { useLazyGetLogByIdQuery, useLazyGetLogsQuery } from "@/lib/store/apis/logsApi";
 import type { LogEntry, LogFilters, Pagination } from "@/lib/types/logs";
@@ -26,8 +27,8 @@ import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import NumberFlow from "@number-flow/react";
 import { useLocation } from "@tanstack/react-router";
 import { AlertCircle, BarChart, CheckCircle, Clock, DollarSign, Hash, Info } from "lucide-react";
-import { parseAsSafeString } from "@/lib/queryParamsParser";
-import { parseAsArrayOf, parseAsBoolean, parseAsInteger, parseAsString, useQueryStates } from "nuqs";
+import { parseAsSafeArrayOf, parseAsSafeString } from "@/lib/queryParamsParser";
+import { parseAsBoolean, parseAsInteger, parseAsString, useQueryStates } from "nuqs";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 export default function LogsPage() {
@@ -36,6 +37,7 @@ export default function LogsPage() {
 	const hasCheckedEmptyState = useRef(false);
 
 	const hasDeleteAccess = useRbac(RbacResource.Logs, RbacOperation.Delete);
+	const hasRevealAccess = useRbac(RbacResource.Logs, RbacOperation.Reveal);
 
 	const [deleteLogs] = useDeleteLogsMutation();
 	// Lazy query kept only for handleLogNavigate (fetches adjacent pages on demand)
@@ -72,20 +74,22 @@ export default function LogsPage() {
 	const [urlState, setUrlState] = useQueryStates(
 		{
 			parent_request_id: parseAsString.withDefault(""),
-			providers: parseAsArrayOf(parseAsString).withDefault([]),
-			models: parseAsArrayOf(parseAsString).withDefault([]),
-			aliases: parseAsArrayOf(parseAsString).withDefault([]),
-			status: parseAsArrayOf(parseAsString).withDefault([]),
-			stop_reasons: parseAsArrayOf(parseAsString).withDefault([]),
-			objects: parseAsArrayOf(parseAsString).withDefault([]),
-			selected_key_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			virtual_key_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			routing_rule_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			routing_engine_used: parseAsArrayOf(parseAsString).withDefault([]),
-			user_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			team_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			customer_ids: parseAsArrayOf(parseAsString).withDefault([]),
-			business_unit_ids: parseAsArrayOf(parseAsString).withDefault([]),
+			providers: parseAsSafeArrayOf.withDefault([]),
+			models: parseAsSafeArrayOf.withDefault([]),
+			aliases: parseAsSafeArrayOf.withDefault([]),
+			status: parseAsSafeArrayOf.withDefault([]),
+			stop_reasons: parseAsSafeArrayOf.withDefault([]),
+			objects: parseAsSafeArrayOf.withDefault([]),
+			selected_key_ids: parseAsSafeArrayOf.withDefault([]),
+			virtual_key_ids: parseAsSafeArrayOf.withDefault([]),
+			routing_rule_ids: parseAsSafeArrayOf.withDefault([]),
+			routing_engine_used: parseAsSafeArrayOf.withDefault([]),
+			apps: parseAsSafeArrayOf.withDefault([]),
+			user_agents: parseAsSafeArrayOf.withDefault([]),
+			user_ids: parseAsSafeArrayOf.withDefault([]),
+			team_ids: parseAsSafeArrayOf.withDefault([]),
+			customer_ids: parseAsSafeArrayOf.withDefault([]),
+			business_unit_ids: parseAsSafeArrayOf.withDefault([]),
 			content_search: parseAsSafeString.withDefault(""),
 			start_time: parseAsInteger.withDefault(defaultTimeRange.startTime),
 			end_time: parseAsInteger.withDefault(defaultTimeRange.endTime),
@@ -96,7 +100,7 @@ export default function LogsPage() {
 			polling: parseAsBoolean.withDefault(true).withOptions({ clearOnDefault: false }),
 			period: parseAsString.withDefault(hasExplicitTimeRange ? "" : "1h").withOptions({ clearOnDefault: false }),
 			missing_cost_only: parseAsBoolean.withDefault(false),
-			cache_hit_types: parseAsArrayOf(parseAsString).withDefault([]),
+			cache_hit_types: parseAsSafeArrayOf.withDefault([]),
 			metadata_filters: parseAsString.withDefault(""),
 			selected_log: parseAsString.withDefault(""),
 		},
@@ -125,6 +129,8 @@ export default function LogsPage() {
 			virtual_key_ids: urlState.virtual_key_ids,
 			routing_rule_ids: urlState.routing_rule_ids,
 			routing_engine_used: urlState.routing_engine_used,
+			apps: urlState.apps,
+			user_agents: urlState.user_agents,
 			user_ids: urlState.user_ids,
 			team_ids: urlState.team_ids,
 			customer_ids: urlState.customer_ids,
@@ -161,6 +167,8 @@ export default function LogsPage() {
 			urlState.virtual_key_ids,
 			urlState.routing_rule_ids,
 			urlState.routing_engine_used,
+			urlState.apps,
+			urlState.user_agents,
 			urlState.user_ids,
 			urlState.team_ids,
 			urlState.customer_ids,
@@ -191,15 +199,23 @@ export default function LogsPage() {
 	// Helper to update filters in URL
 	const setFilters = useCallback(
 		(newFilters: LogFilters) => {
-			// Mark time range as user-modified only if start_time or end_time actually changed
-			const timeChanged = newFilters.start_time !== filters.start_time || newFilters.end_time !== filters.end_time;
+			// The sidebar/header only manage dimension filters, never the time range: in
+			// period mode `newFilters` carries no start/end, so only touch time when an
+			// explicit range is actually provided — otherwise we'd wipe the active period/range.
+			const hasExplicitTime = !!newFilters.start_time && !!newFilters.end_time;
+			const timeChanged =
+				hasExplicitTime && (newFilters.start_time !== filters.start_time || newFilters.end_time !== filters.end_time);
 			if (timeChanged) {
 				userModifiedTimeRange.current = true;
 			}
 
 			setUrlState({
-				// Clear the period whenever an absolute range is applied via setFilters
-				...(timeChanged && { period: "" }),
+				// Clear the period and apply the absolute range only when an explicit one is provided
+				...(timeChanged && {
+					period: "",
+					start_time: dateUtils.toUnixTimestamp(new Date(newFilters.start_time!)),
+					end_time: dateUtils.toUnixTimestamp(new Date(newFilters.end_time!)),
+				}),
 				parent_request_id: newFilters.parent_request_id || "",
 				providers: newFilters.providers || [],
 				models: newFilters.models || [],
@@ -211,13 +227,13 @@ export default function LogsPage() {
 				virtual_key_ids: newFilters.virtual_key_ids || [],
 				routing_rule_ids: newFilters.routing_rule_ids || [],
 				routing_engine_used: newFilters.routing_engine_used || [],
+				apps: newFilters.apps || [],
+				user_agents: newFilters.user_agents || [],
 				user_ids: newFilters.user_ids || [],
 				team_ids: newFilters.team_ids || [],
 				customer_ids: newFilters.customer_ids || [],
 				business_unit_ids: newFilters.business_unit_ids || [],
 				content_search: newFilters.content_search || "",
-				start_time: newFilters.start_time ? dateUtils.toUnixTimestamp(new Date(newFilters.start_time)) : undefined,
-				end_time: newFilters.end_time ? dateUtils.toUnixTimestamp(new Date(newFilters.end_time)) : undefined,
 				missing_cost_only: newFilters.missing_cost_only ?? false,
 				cache_hit_types: newFilters.cache_hit_types || [],
 				metadata_filters: newFilters.metadata_filters ? JSON.stringify(newFilters.metadata_filters) : "",
@@ -434,6 +450,15 @@ export default function LogsPage() {
 				title: "Total Tokens",
 				value: <NumberFlow value={stats?.total_tokens ?? 0} format={COMPACT_NUMBER_FORMAT} />,
 				icon: <Hash className="size-4" />,
+				subValue: (
+					<>
+						<NumberFlow value={stats?.prompt_tokens ?? 0} format={COMPACT_NUMBER_FORMAT} />
+						<span> in / </span>
+						<NumberFlow value={stats?.completion_tokens ?? 0} format={COMPACT_NUMBER_FORMAT} />
+						<span> out</span>
+					</>
+				),
+				description: "Total tokens used, split into input (prompt) and output (completion) tokens.",
 			},
 			{
 				title: "Total Cost",
@@ -463,7 +488,21 @@ export default function LogsPage() {
 		return Object.keys(filterData.metadata_keys).sort();
 	}, [filterData?.metadata_keys]);
 
-	const columns = useMemo(() => createColumns(handleDelete, hasDeleteAccess, metadataKeys), [handleDelete, hasDeleteAccess, metadataKeys]);
+	const { data: userAgentMappingsData } = useGetUserAgentMappingsQuery();
+	const customAppIcons = useMemo(() => {
+		const icons: Record<string, string> = {};
+		for (const mapping of userAgentMappingsData?.mappings ?? []) {
+			if (mapping.app && mapping.logo && mapping.logo_mime) {
+				icons[mapping.app] = `data:${mapping.logo_mime};base64,${mapping.logo}`;
+			}
+		}
+		return icons;
+	}, [userAgentMappingsData?.mappings]);
+
+	const columns = useMemo(
+		() => createColumns(handleDelete, hasDeleteAccess, metadataKeys, customAppIcons),
+		[customAppIcons, handleDelete, hasDeleteAccess, metadataKeys],
+	);
 
 	const columnIds = useMemo(
 		() => columns.map((col) => ("id" in col && col.id ? col.id : "accessorKey" in col ? String(col.accessorKey) : "")).filter(Boolean),
@@ -477,12 +516,21 @@ export default function LogsPage() {
 			input: "Message",
 			provider: "Provider",
 			model: "Model",
+			app: "App",
 			latency: "Latency",
 			tokens: "Tokens",
 			cost: "Cost",
+			virtual_key: "Virtual Key",
+			routing_rule: "Routing Rule",
+			team: "Team",
+			customer: "Customer",
+			user: "User",
+			business_unit: "Business Unit",
 		}),
 		[],
 	);
+
+	const DEFAULT_HIDDEN_COLUMNS = useMemo(() => ["virtual_key", "routing_rule", "team", "customer", "user", "business_unit"], []);
 
 	const {
 		entries: columnEntries,
@@ -496,6 +544,8 @@ export default function LogsPage() {
 	} = useColumnConfig({
 		columnIds,
 		paramName: "cols",
+		storageKey: "bifrost.logs.cols",
+		defaultHidden: DEFAULT_HIDDEN_COLUMNS,
 		fixedColumns: hasDeleteAccess ? { right: ["actions"] } : undefined,
 	});
 
@@ -617,6 +667,7 @@ export default function LogsPage() {
 								onPollToggle={handlePollToggle}
 								period={period}
 								onPeriodChange={handlePeriodChange}
+								totalLogs={totalItems}
 								columnEntries={columnEntries}
 								columnLabels={COLUMN_LABELS}
 								onToggleColumnVisibility={toggleColumnVisibility}
@@ -649,6 +700,9 @@ export default function LogsPage() {
 												)}
 											</div>
 											<div className="truncate font-mono text-xl font-medium sm:text-2xl">{card.value}</div>
+											{"subValue" in card && card.subValue && (
+												<div className="truncate font-mono text-[10.5px] tabular-nums">{card.subValue}</div>
+											)}
 										</div>
 									</CardContent>
 								</Card>
@@ -712,6 +766,7 @@ export default function LogsPage() {
 						open={selectedLog !== null}
 						onOpenChange={(open) => !open && setUrlState({ selected_log: "" })}
 						handleDelete={hasDeleteAccess ? handleDelete : undefined}
+						canReveal={hasRevealAccess}
 						onNavigate={handleLogNavigate}
 						hasPrev={selectedLogIndex > 0 || (selectedLogIndex !== -1 && pagination.offset > 0)}
 						hasNext={selectedLogIndex !== -1 && (selectedLogIndex < logs.length - 1 || pagination.offset + pagination.limit < totalItems)}

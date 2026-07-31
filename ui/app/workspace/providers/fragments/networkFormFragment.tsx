@@ -1,6 +1,6 @@
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { Button } from "@/components/ui/button";
-import { EnvVarInput } from "@/components/ui/envVarInput";
+import { SecretVarInput } from "@/components/ui/secretVarInput";
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { HeadersTable } from "@/components/ui/headersTable";
 import { Input } from "@/components/ui/input";
@@ -10,8 +10,8 @@ import { DefaultNetworkConfig } from "@/lib/constants/config";
 import { getErrorMessage, setProviderFormDirtyState, useAppDispatch } from "@/lib/store";
 import { useUpdateProviderMutation } from "@/lib/store/apis/providersApi";
 import { ModelProvider, isKnownProvider } from "@/lib/types/config";
-import { networkOnlyFormSchema, type EnvVar, type NetworkOnlyFormSchema } from "@/lib/types/schemas";
-import { toEnvVarFormValue, toOptionalEnvVarPayload } from "@/lib/utils/envVarForm";
+import { networkOnlyFormSchema, type SecretVar, type NetworkOnlyFormSchema } from "@/lib/types/schemas";
+import { toSecretVarFormValue, toOptionalSecretVarPayload } from "@/lib/utils/secretVarForm";
 import { RbacOperation, RbacResource, useRbac } from "@enterprise/lib";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
@@ -35,11 +35,19 @@ const secondsToHumanReadable = (seconds: number) => {
 	}
 	if (seconds < 3600) {
 		const minutes = Math.floor(seconds / 60);
-		return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
+		const remainingSeconds = seconds % 60;
+		const parts: string[] = [`${minutes} ${minutes === 1 ? "minute" : "minutes"}`];
+		if (remainingSeconds > 0) parts.push(`${remainingSeconds} ${remainingSeconds === 1 ? "second" : "seconds"}`);
+		return parts.join(" ");
 	}
 	if (seconds < 86400) {
 		const hours = Math.floor(seconds / 3600);
-		return `${hours} ${hours === 1 ? "hour" : "hours"}`;
+		const minutes = Math.floor((seconds % 3600) / 60);
+		const remainingSeconds = seconds % 60;
+		const parts: string[] = [`${hours} ${hours === 1 ? "hour" : "hours"}`];
+		if (minutes > 0) parts.push(`${minutes} ${minutes === 1 ? "minute" : "minutes"}`);
+		if (remainingSeconds > 0) parts.push(`${remainingSeconds} ${remainingSeconds === 1 ? "second" : "seconds"}`);
+		return parts.join(" ");
 	}
 	// For >= 1 day, only show non-zero components
 	const days = Math.floor(seconds / 86400);
@@ -74,9 +82,11 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				retry_backoff_initial: provider.network_config?.retry_backoff_initial ?? DefaultNetworkConfig.retry_backoff_initial,
 				retry_backoff_max: provider.network_config?.retry_backoff_max ?? DefaultNetworkConfig.retry_backoff_max,
 				insecure_skip_verify: provider.network_config?.insecure_skip_verify ?? DefaultNetworkConfig.insecure_skip_verify,
-				ca_cert_pem: toEnvVarFormValue(provider.network_config?.ca_cert_pem as EnvVar | string | undefined),
+				ca_cert_pem: toSecretVarFormValue(provider.network_config?.ca_cert_pem as SecretVar | string | undefined),
 				stream_idle_timeout_in_seconds:
 					provider.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
+				keep_alive_timeout_in_seconds:
+					provider.network_config?.keep_alive_timeout_in_seconds ?? DefaultNetworkConfig.keep_alive_timeout_in_seconds,
 				max_conns_per_host: provider.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
 				enforce_http2: provider.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 				allow_private_network: provider.network_config?.allow_private_network ?? DefaultNetworkConfig.allow_private_network,
@@ -104,14 +114,17 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				...provider.network_config,
 				base_url: data.network_config?.base_url || undefined,
 				extra_headers: data.network_config?.extra_headers || undefined,
-				default_request_timeout_in_seconds: data.network_config?.default_request_timeout_in_seconds ?? 30,
+				default_request_timeout_in_seconds:
+					data.network_config?.default_request_timeout_in_seconds ?? DefaultNetworkConfig.default_request_timeout_in_seconds,
 				max_retries: data.network_config?.max_retries ?? 0,
 				retry_backoff_initial: data.network_config?.retry_backoff_initial ?? 500,
 				retry_backoff_max: data.network_config?.retry_backoff_max ?? 10000,
 				insecure_skip_verify: data.network_config?.insecure_skip_verify ?? false,
-				ca_cert_pem: toOptionalEnvVarPayload(data.network_config?.ca_cert_pem),
+				ca_cert_pem: toOptionalSecretVarPayload(data.network_config?.ca_cert_pem),
 				stream_idle_timeout_in_seconds:
 					data.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
+				keep_alive_timeout_in_seconds:
+					data.network_config?.keep_alive_timeout_in_seconds ?? DefaultNetworkConfig.keep_alive_timeout_in_seconds,
 				max_conns_per_host: data.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
 				enforce_http2: data.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 				allow_private_network: data.network_config?.allow_private_network ?? DefaultNetworkConfig.allow_private_network,
@@ -142,9 +155,11 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 				retry_backoff_initial: provider.network_config?.retry_backoff_initial ?? DefaultNetworkConfig.retry_backoff_initial,
 				retry_backoff_max: provider.network_config?.retry_backoff_max ?? DefaultNetworkConfig.retry_backoff_max,
 				insecure_skip_verify: provider.network_config?.insecure_skip_verify ?? DefaultNetworkConfig.insecure_skip_verify,
-				ca_cert_pem: toEnvVarFormValue(provider.network_config?.ca_cert_pem as EnvVar | string | undefined),
+				ca_cert_pem: toSecretVarFormValue(provider.network_config?.ca_cert_pem as SecretVar | string | undefined),
 				stream_idle_timeout_in_seconds:
 					provider.network_config?.stream_idle_timeout_in_seconds ?? DefaultNetworkConfig.stream_idle_timeout_in_seconds,
+				keep_alive_timeout_in_seconds:
+					provider.network_config?.keep_alive_timeout_in_seconds ?? DefaultNetworkConfig.keep_alive_timeout_in_seconds,
 				max_conns_per_host: provider.network_config?.max_conns_per_host ?? DefaultNetworkConfig.max_conns_per_host,
 				enforce_http2: provider.network_config?.enforce_http2 ?? DefaultNetworkConfig.enforce_http2,
 				allow_private_network: provider.network_config?.allow_private_network ?? DefaultNetworkConfig.allow_private_network,
@@ -377,6 +392,41 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									</FormItem>
 								)}
 							/>
+							<FormField
+								control={form.control}
+								name="network_config.keep_alive_timeout_in_seconds"
+								render={({ field }) => (
+									<FormItem className="flex-1">
+										<FormLabel>Keep-Alive Timeout (seconds)</FormLabel>
+										<FormControl>
+											<Input
+												data-testid="network-config-keep-alive-timeout-input"
+												placeholder="30"
+												{...field}
+												value={field.value === undefined || Number.isNaN(field.value) ? "" : field.value}
+												disabled={!hasUpdateProviderAccess}
+												onChange={(e) => {
+													const value = e.target.value;
+													if (value === "") {
+														field.onChange(undefined);
+														return;
+													}
+													const parsed = Number(value);
+													if (!Number.isNaN(parsed)) {
+														field.onChange(parsed);
+													}
+													form.trigger("network_config");
+												}}
+											/>
+										</FormControl>
+										<FormDescription>
+											{field.value ? secondsToHumanReadable(field.value) : ""} Idle keep-alive for pooled connections. Set below the
+											upstream server&apos;s keep-alive to avoid reusing connections it has already closed.
+										</FormDescription>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
 						</div>
 						<FormField
 							control={form.control}
@@ -409,8 +459,8 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 									<div className="space-y-0.5">
 										<FormLabel>Allow Private Network</FormLabel>
 										<FormDescription>
-											Allow connections to private IPs (e.g. <code>10.x</code>, <code>192.168.x</code>). Required for providers on a
-											LAN, k8s pod network, or private VPC. Cloud metadata addresses (169.254.x.x) are always blocked.
+											Allow connections to private IPs (e.g. <code>10.x</code>, <code>192.168.x</code>). Required for providers on a LAN,
+											k8s pod network, or private VPC. Cloud metadata addresses (169.254.x.x) are always blocked.
 										</FormDescription>
 									</div>
 									<FormControl>
@@ -480,7 +530,7 @@ export function NetworkFormFragment({ provider }: NetworkFormFragmentProps) {
 											<FormItem>
 												<FormLabel>CA Certificate (PEM) (Optional)</FormLabel>
 												<FormControl>
-													<EnvVarInput
+													<SecretVarInput
 														variant="textarea"
 														placeholder={`-----BEGIN CERTIFICATE-----
 ...

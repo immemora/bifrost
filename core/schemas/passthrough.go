@@ -6,6 +6,7 @@ type BifrostPassthroughRequest struct {
 	Method      string
 	Path        string // stripped path, e.g. "/v1/fine-tuning/jobs"
 	RawQuery    string // raw query string, no "?"
+	UpstreamURL string // optional base URL override for host-backed passthrough routes
 	Body        []byte
 	SafeHeaders map[string]string // client headers, auth already stripped
 }
@@ -15,9 +16,10 @@ type BifrostPassthroughRequest struct {
 // functions — no new pricing logic is required.
 type BifrostPassthroughUsage struct {
 	// Text / chat / responses / embeddings
-	LLMUsage    *BifrostLLMUsage
-	ServiceTier *BifrostServiceTier // "priority" | "flex" | nil (default)
-	Speed       *string             // "fast" | "standard" — speed actually served (Anthropic fast mode); drives fast-mode billing
+	LLMUsage     *BifrostLLMUsage
+	ServiceTier  *BifrostServiceTier // "priority" | "flex" | nil (default)
+	Speed        *string             // "fast" | "standard" — speed actually served (Anthropic fast mode); drives fast-mode billing
+	InferenceGeo *string             // "us" | "global" — inference geography served (Anthropic data residency); drives the 1.1x US multiplier
 
 	// Image generation / edit / variation
 	ImageUsage   *ImageUsage

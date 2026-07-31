@@ -13,6 +13,7 @@ import { DefaultLargePayloadConfig, LargePayloadConfig } from "@enterprise/lib/t
 import { Info, Plus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import UserAgentMappingsView from "./userAgentMappingsView";
 
 // Security headers that cannot be configured in allowlist/denylist
 // These headers are always blocked for security reasons regardless of configuration
@@ -106,6 +107,7 @@ export default function ClientSettingsView() {
 		return (
 			localConfig.drop_excess_requests !== config.drop_excess_requests ||
 			localConfig.disable_db_pings_in_health !== config.disable_db_pings_in_health ||
+			localConfig.dump_errors_in_console_logs !== config.dump_errors_in_console_logs ||
 			localConfig.async_job_result_ttl !== config.async_job_result_ttl ||
 			!headerFilterConfigEqual(localConfig.header_filter_config, config.header_filter_config)
 		);
@@ -335,6 +337,26 @@ export default function ClientSettingsView() {
 						disabled={!hasSettingsUpdateAccess}
 					/>
 				</div>
+
+				{/* Dump Errors in Console Logs */}
+				<div className="flex items-center justify-between space-x-2">
+					<div className="space-y-0.5">
+						<label htmlFor="dump-errors-in-console-logs" className="text-sm font-medium">
+							Dump Errors in Console Logs
+						</label>
+						<p className="text-muted-foreground text-sm">
+							If enabled, full error details are written to the server console logs. Useful for debugging, but may be noisy in production.
+						</p>
+					</div>
+					<Switch
+						id="dump-errors-in-console-logs"
+						data-testid="client-settings-dump-errors-switch"
+						size="md"
+						checked={localConfig.dump_errors_in_console_logs}
+						onCheckedChange={(checked) => handleConfigChange("dump_errors_in_console_logs", checked)}
+						disabled={!hasSettingsUpdateAccess}
+					/>
+				</div>
 				{/* Async Job Result TTL */}
 				<div className="flex items-center justify-between space-x-2">
 					<div className="space-y-0.5">
@@ -357,6 +379,8 @@ export default function ClientSettingsView() {
 					/>
 				</div>
 			</div>
+
+			<UserAgentMappingsView disabled={isLoading || !hasSettingsUpdateAccess} />
 
 			{/* Header Filter Section */}
 			<div className="space-y-4">

@@ -213,14 +213,14 @@ export function MCPLibraryAddServerSheet({ open, onClose }: MCPLibraryAddServerS
 										data-testid="mcp-add-envs-input"
 										{...register("envs")}
 									/>
-									<p className="text-muted-foreground text-xs">Only names — users supply values at install time.</p>
+									<p className="text-muted-foreground text-xs">Only names; users supply values at install time.</p>
 								</div>
 							</div>
 						)}
 
 						{/* Auth + category */}
 						<div className="grid grid-cols-2 gap-3">
-							<div className="space-y-2 w-full">
+							<div className="w-full space-y-2">
 								<Label>Authentication</Label>
 								<Select value={authType} onValueChange={(v) => setValue("auth_type", v as MCPAuthType)}>
 									<SelectTrigger data-testid="mcp-add-auth-type" className="w-full">
@@ -250,7 +250,7 @@ export function MCPLibraryAddServerSheet({ open, onClose }: MCPLibraryAddServerS
 									data-testid="mcp-add-header-keys-input"
 									{...register("required_header_keys")}
 								/>
-								<p className="text-muted-foreground text-xs">Only names — users supply values at install time.</p>
+								<p className="text-muted-foreground text-xs">Only names; users supply values at install time.</p>
 							</div>
 						)}
 

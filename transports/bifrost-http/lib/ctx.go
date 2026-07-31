@@ -353,7 +353,7 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 			}
 			return true
 		}
-		// Handle virtual key header (x-bf-vk, authorization, x-api-key, x-goog-api-key headers)
+		// Handle virtual key header (x-bf-vk, authorization, x-api-key, x-goog-api-key, api-key headers)
 		if keyStr == string(schemas.BifrostContextKeyVirtualKey) {
 			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
 			return true
@@ -374,6 +374,10 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 			return true
 		}
 		if keyStr == "x-goog-api-key" && strings.HasPrefix(strings.ToLower(string(value)), governance.VirtualKeyPrefix) {
+			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
+			return true
+		}
+		if keyStr == "api-key" && strings.HasPrefix(strings.ToLower(string(value)), governance.VirtualKeyPrefix) {
 			bifrostCtx.SetValue(schemas.BifrostContextKeyVirtualKey, string(value))
 			return true
 		}
@@ -484,6 +488,18 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 			extraHeaders[labelName] = append(extraHeaders[labelName], string(value))
 			return true
 		}
+		// Async webhook header: names the webhook endpoint to notify when the
+		// async job finishes. Carried as-is; the submit path validates it.
+		// Handled before direct forwarding: an allowlist that matches this
+		// reserved header would otherwise forward-and-return below, dropping the
+		// endpoint name so the job runs with no notification.
+		if keyStr == "x-bf-async-webhook" {
+			valueStr := strings.TrimSpace(string(value))
+			if valueStr != "" {
+				bifrostCtx.SetValue(schemas.BifrostContextKeyAsyncWebhookEndpoint, valueStr)
+			}
+			return true
+		}
 		// Direct header forwarding: when allowlist is configured, any header explicitly
 		// in the allowlist can be forwarded directly without the x-bf-eh- prefix.
 		// This enables forwarding arbitrary headers like "anthropic-beta" directly.
@@ -555,13 +571,6 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 			}
 			return true
 		}
-		if keyStr == "x-bf-disable-content-logging" {
-			if b, err := strconv.ParseBool(string(value)); err == nil {
-				bifrostCtx.SetValue(schemas.BifrostContextKeyDisableContentLogging, b)
-			}
-			return true
-		}
-
 		// Compat header: per-request override of compat plugin settings.
 		// Accepts: "true" (enable all), JSON array of feature names, or ["*"] (enable all).
 		// An empty array [] or absent header means no overrides.
@@ -666,6 +675,9 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 	// Direct key bypass: requires both the server-side AllowDirectKeys setting and the
 	// per-request x-bf-direct-key: true header. The server setting is the admin opt-in;
 	// the header is the per-request opt-in from the caller.
+	// Enterprise SCIM inference auth runs before this context conversion, so it mirrors
+	// this config/header gate separately to avoid validating provider bearer tokens as
+	// SCIM user JWTs before direct-key extraction can happen here.
 	if store != nil && store.ShouldAllowDirectKeys() && string(ctx.Request.Header.Peek("x-bf-direct-key")) == "true" {
 		var apiKey string
 		authHeader := string(ctx.Request.Header.Peek("Authorization"))
@@ -692,7 +704,7 @@ func ConvertToBifrostContext(ctx *fasthttp.RequestCtx, store HandlerStore) (*sch
 			key := schemas.Key{
 				ID:     "header-provided",
 				Name:   "header-provided",
-				Value:  schemas.EnvVar{Val: apiKey},
+				Value:  schemas.SecretVar{Val: apiKey},
 				Models: []string{},
 				Weight: 1.0,
 			}
@@ -736,7 +748,13 @@ func BuildBaseURL(ctx *fasthttp.RequestCtx, externalBaseURL string) string {
 	if comma := strings.IndexByte(xfProto, ','); comma >= 0 {
 		xfProto = strings.TrimSpace(xfProto[:comma])
 	}
-	if ctx.IsTLS() || xfProto == "https" {
+	// x-bf-forwarded-proto is honored for setups where a managed LB overwrites the
+	// standard X-Forwarded-Proto (e.g. AWS L4 NLB -> ALB hops); the edge injects it.
+	xbfProto := strings.ToLower(strings.TrimSpace(string(ctx.Request.Header.Peek("x-bf-forwarded-proto"))))
+	if comma := strings.IndexByte(xbfProto, ','); comma >= 0 {
+		xbfProto = strings.TrimSpace(xbfProto[:comma])
+	}
+	if ctx.IsTLS() || xfProto == "https" || xbfProto == "https" {
 		scheme = "https"
 	}
 	host := string(ctx.Host())
