@@ -1297,6 +1297,63 @@ func TestOpenAIInbound_MaxCompletionTokensTakesPriorityOverMaxTokens(t *testing.
 	}
 }
 
+func TestToOpenAIChatRequest_OpencodeGoUsesMaxTokensOnly(t *testing.T) {
+	ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+	request := &schemas.BifrostChatRequest{
+		Provider: schemas.OpencodeGo,
+		Model:    "deepseek-v4-flash",
+		Input: []schemas.ChatMessage{{
+			Role:    schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("hello")},
+		}},
+		Params: &schemas.ChatParameters{
+			MaxCompletionTokens: schemas.Ptr(200),
+			ToolChoice: &schemas.ChatToolChoice{
+				ChatToolChoiceStruct: &schemas.ChatToolChoiceStruct{Type: "function"},
+			},
+			Reasoning: &schemas.ChatReasoning{Effort: schemas.Ptr("medium")},
+		},
+	}
+
+	result := ToOpenAIChatRequest(ctx, request)
+	if result.MaxTokens == nil || *result.MaxTokens != 200 {
+		t.Fatalf("max_tokens = %v, want 200", result.MaxTokens)
+	}
+	if result.MaxCompletionTokens != nil {
+		t.Fatalf("max_completion_tokens must be omitted for Opencode Go, got %d", *result.MaxCompletionTokens)
+	}
+	if result.ToolChoice == nil || result.ToolChoice.ChatToolChoiceStruct == nil {
+		t.Fatal("Opencode Go must preserve structured tool_choice")
+	}
+	if result.Reasoning == nil || result.Reasoning.Effort == nil || *result.Reasoning.Effort != "medium" {
+		t.Fatalf("Opencode Go must preserve reasoning effort, got %+v", result.Reasoning)
+	}
+	if request.Params.MaxCompletionTokens == nil || *request.Params.MaxCompletionTokens != 200 {
+		t.Fatalf("request max_completion_tokens was mutated: %+v", request.Params.MaxCompletionTokens)
+	}
+}
+
+func TestToOpenAIChatRequest_OpencodeZenKeepsMaxCompletionTokens(t *testing.T) {
+	ctx := schemas.NewBifrostContext(nil, schemas.NoDeadline)
+	request := &schemas.BifrostChatRequest{
+		Provider: schemas.OpencodeZen,
+		Model:    "deepseek-v4-flash",
+		Input: []schemas.ChatMessage{{
+			Role:    schemas.ChatMessageRoleUser,
+			Content: &schemas.ChatMessageContent{ContentStr: schemas.Ptr("hello")},
+		}},
+		Params: &schemas.ChatParameters{MaxCompletionTokens: schemas.Ptr(200)},
+	}
+
+	result := ToOpenAIChatRequest(ctx, request)
+	if result.MaxCompletionTokens == nil || *result.MaxCompletionTokens != 200 {
+		t.Fatalf("max_completion_tokens = %v, want 200", result.MaxCompletionTokens)
+	}
+	if result.MaxTokens != nil {
+		t.Fatalf("max_tokens must be omitted for Opencode Zen, got %d", *result.MaxTokens)
+	}
+}
+
 // When a conversation switches from Gemini to OpenAI, Gemini's thoughtSignature is
 // embedded in the tool call_id as "<baseID>_ts_<sig>" and can exceed OpenAI's 64-char
 // limit. The chat converter must strip it to the base ID on the wire while leaving the

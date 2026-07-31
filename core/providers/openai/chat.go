@@ -84,6 +84,10 @@ func ToOpenAIChatRequest(ctx *schemas.BifrostContext, bifrostReq *schemas.Bifros
 		openaiReq.filterOpenAISpecificParameters(capModel)
 		openaiReq.applyMistralCompatibility()
 		return openaiReq
+	case schemas.OpencodeGo:
+		openaiReq.filterOpenAISpecificParameters(capModel)
+		openaiReq.applyOpencodeGoCompatibility()
+		return openaiReq
 	case schemas.Vertex:
 		openaiReq.filterOpenAISpecificParameters(capModel)
 
@@ -194,6 +198,15 @@ func (req *OpenAIChatRequest) applyMistralCompatibility() {
 		if *req.Reasoning.Effort != "none" && *req.Reasoning.Effort != "high" {
 			req.Reasoning.Effort = schemas.Ptr("high")
 		}
+	}
+}
+
+// applyOpencodeGoCompatibility keeps the OpenCode Go Chat Completions wire
+// contract without inheriting Mistral's unrelated tool-choice and reasoning rules.
+func (req *OpenAIChatRequest) applyOpencodeGoCompatibility() {
+	if req.MaxCompletionTokens != nil {
+		req.MaxTokens = req.MaxCompletionTokens
+		req.MaxCompletionTokens = nil
 	}
 }
 
