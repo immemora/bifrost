@@ -1,5 +1,5 @@
-# Dockerfile.local - Uses local module sources via go workspace
-# For pre-release CI builds where module versions aren't published yet
+# Dockerfile.local - Uses the repository's checked-in Go workspace.
+# For local and pre-release builds where sibling module versions are not published yet.
 
 # --- UI Build Stage: Build the React + Vite frontend ---
   FROM node:25-alpine3.23@sha256:cf38e1f3c28ac9d81cdc0c51d8220320b3b618780e44ef96a39f76f7dbfef023 AS ui-builder
@@ -18,48 +18,28 @@
 
   # --- Go Build Stage: Compile the Go binary using local modules ---
   FROM golang:1.26.5-alpine3.23@sha256:622e56dbc11a8cfe87cafa2331e9a201877271cbff918af53d3be315f3da88cc AS builder
-  WORKDIR /build
+  WORKDIR /workspace
 
   # Install dependencies including gcc for CGO and sqlite
   RUN apk add --no-cache gcc musl-dev sqlite-dev binutils binutils-gold
 
   # Set environment for CGO-enabled build (required for go-sqlite3)
-  ENV CGO_ENABLED=1 GOOS=linux
+  ENV CGO_ENABLED=1 GOOS=linux GOWORK=/workspace/go.work
 
-  # Copy all local modules
-  COPY core/ ./core/
-  COPY framework/ ./framework/
-  COPY plugins/ ./plugins/
-  COPY transports/ ./transports/
-
-  # Set up go workspace to resolve local module dependencies
-  RUN go work init && \
-    go work use ./core && \
-    go work use ./framework && \
-    go work use ./plugins/compat && \
-    go work use ./plugins/governance && \
-    go work use ./plugins/jsonparser && \
-    go work use ./plugins/logging && \
-    go work use ./plugins/maxim && \
-    go work use ./plugins/mocker && \
-    go work use ./plugins/otel && \
-    go work use ./plugins/prompts && \
-    go work use ./plugins/semanticcache && \
-    go work use ./plugins/telemetry && \
-    go work use ./transports
+  # Copy the repository so Go resolves exactly the modules listed in go.work.
+  COPY . .
 
   # Copy UI build output into transports
   COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
 
   # Build the binary with CGO enabled and static SQLite linking
   ARG VERSION=unknown
-  RUN cd /build/transports && \
-    go build \
-      -ldflags="-w -s -X main.Version=v${VERSION} -extldflags '-static'" \
-      -a -trimpath \
-      -tags "sqlite_static" \
-      -o /app/main \
-      ./bifrost-http
+  RUN go build \
+    -ldflags="-w -s -X main.Version=v${VERSION} -extldflags '-static'" \
+    -a -trimpath \
+    -tags "sqlite_static" \
+    -o /app/main \
+    ./transports/bifrost-http
 
   # Verify build succeeded
   RUN test -f /app/main || (echo "Build failed" && exit 1)
@@ -76,7 +56,7 @@
 
   # Create data directory and set up user
   COPY --from=builder /app/main .
-  COPY --from=builder /build/transports/docker-entrypoint.sh .
+  COPY --from=builder /workspace/transports/docker-entrypoint.sh .
 
   # Getting arguments
   ARG ARG_APP_PORT=8080
