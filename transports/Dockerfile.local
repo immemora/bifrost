@@ -28,6 +28,8 @@
 
   # Copy the repository so Go resolves exactly the modules listed in go.work.
   COPY . .
+  # Keep the workspace directive compatible with the pinned builder toolchain.
+  RUN go_version="$(go env GOVERSION)" && go work edit -go="${go_version#go}"
 
   # Copy UI build output into transports
   COPY --from=ui-builder /app/out ./transports/bifrost-http/ui
